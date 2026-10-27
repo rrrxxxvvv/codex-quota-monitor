@@ -43,7 +43,7 @@ class Client extends EventEmitter {
     this.pending.set(id,{resolve,reject,timer});
     this.proc.stdin.write(JSON.stringify({id,method,...(params ? {params} : {})})+'\n');
   });}
-  async init(){await this.request('initialize',{clientInfo:{name:'quota_reset_monitor',title:'Codex Quota Monitor',version:'2.0.0'}});this.proc.stdin.write(JSON.stringify({method:'initialized',params:{}})+'\n');}
+  async init(){await this.request('initialize',{clientInfo:{name:'quota_reset_monitor',title:'Codex Quota Monitor',version:fs.readFileSync(path.join(__dirname,'VERSION'),'utf8').trim()}});this.proc.stdin.write(JSON.stringify({method:'initialized',params:{}})+'\n');}
   close(){this.fail(new Error('服务关闭'));this.proc.kill();}
 }
 module.exports={Client,codexPath};

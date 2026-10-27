@@ -16,7 +16,8 @@ const {RemotePublisher,endpoint,snapshot}=require('../remote.cjs');
     fail=false;await pub.flush();assert.equal(requests,1);now+=60000;await pub.flush();assert.equal(requests,2);assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'remote-status.json'))).error,null);
     await pub.flush();assert.equal(requests,2);
     const stateFile=path.join(dir,'state.json');const changed=JSON.parse(fs.readFileSync(stateFile));changed.checkedAt=new Date(Date.now()+60000).toISOString();fs.writeFileSync(stateFile,JSON.stringify(changed));await pub.flush();assert.equal(requests,2);now+=60000;await pub.flush();assert.equal(requests,3);
-    fs.writeFileSync(path.join(dir,'remote-config.json'),JSON.stringify({enabled:false}));await pub.flush();assert.equal(requests,3);
+    const configFile=path.join(dir,'remote-config.json');const cfg=JSON.parse(fs.readFileSync(configFile));cfg.notifications={weeklyReset:false,expiryDays:[3,1]};fs.writeFileSync(configFile,JSON.stringify(cfg));await pub.flush();assert.equal(requests,4,'settings changes upload the same sample immediately');
+    fs.writeFileSync(configFile,JSON.stringify({enabled:false}));await pub.flush();assert.equal(requests,4);
     console.log('PASS: endpoint validation, HMAC, no account credentials, upload retry, dedup and disabled mode');
   }finally{pub.stop();await new Promise(r=>server.close(r));fs.rmSync(dir,{recursive:true,force:true});}
 })().catch(e=>{console.error(e);process.exitCode=1;});

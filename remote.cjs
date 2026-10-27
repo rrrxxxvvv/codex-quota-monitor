@@ -8,9 +8,20 @@ function endpoint(address) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || !['','/'].includes(url.pathname)) throw Error('请填写服务器 IP:端口或 HTTP(S) 根地址');
   url.pathname = '/v1/quota'; return url.href;
 }
-function snapshot(state, qq) {
+function notificationSettings(raw={}) {
+  const value={};
+  for(const key of ['weeklyReset','offCycleReset','cardExpiry']) {
+    value[key]=raw[key] ?? true;
+    if(typeof value[key]!=='boolean')throw Error('通知开关必须为布尔值');
+  }
+  const days=raw.expiryDays ?? [7,1];
+  if(!Array.isArray(days) || !days.length || days.length>10 || days.some(x=>!Number.isInteger(x)||x<1||x>365)) throw Error('到期阈值需为 1–365 天的整数，最多 10 项');
+  value.expiryDays=[...new Set(days)].sort((a,b)=>b-a);
+  return value;
+}
+function snapshot(state, qq, notifications=notificationSettings()) {
   if(typeof qq!=='string' || !/^[1-9][0-9]{4,11}$/.test(qq)) throw Error('请填写接收推送和查询额度的 QQ 号');
-  return {version:2, qq, accountKey:crypto.createHash('sha256').update(state.accountId).digest('hex'), checkedAt:state.checkedAt,
+  return {version:2, qq, notifications, accountKey:crypto.createHash('sha256').update(state.accountId).digest('hex'), checkedAt:state.checkedAt,
     windows:Object.entries(state.currentWindows).map(([key,w])=>({key,label:w.label,usedPercent:w.usedPercent,windowDurationMins:w.windowDurationMins,resetsAt:w.resetsAt})),
     resetCredits:state.resetCredits ?? null};
 }
@@ -40,7 +51,8 @@ class RemotePublisher {
       const intervalSeconds=uploadInterval(config);
       const qq=String(config.qq || '').trim();
       if(!/^[1-9][0-9]{4,11}$/.test(qq)) throw Error('请填写接收推送和查询额度的 QQ 号');
-      const configKey=JSON.stringify([url,config.secret,intervalSeconds,qq]);
+      const notifications=notificationSettings(config.notifications);
+      const configKey=JSON.stringify([url,config.secret,intervalSeconds,qq,notifications]);
       if(configKey!==this.configKey) {this.configKey=configKey;this.lastAttempt=-Infinity;this.lastSent=null;}
       if(this.now()-this.lastAttempt<intervalSeconds*1000) return;
       let state; try {state=read(path.join(this.data,'state.json'));} catch(e) {if(e.code!=='ENOENT')throw e;}
@@ -48,7 +60,7 @@ class RemotePublisher {
       const identity=url+'|'+config.secret+'|'+state.checkedAt;
       if(identity===this.lastSent) return;
       this.lastAttempt=this.now();
-      const body=JSON.stringify(snapshot(state,qq)), timestamp=String(Math.floor(Date.now()/1000));
+      const body=JSON.stringify(snapshot(state,qq,notifications)), timestamp=String(Math.floor(Date.now()/1000));
       const signature=crypto.createHmac('sha256',config.secret).update(timestamp+'\n'+body).digest('hex');
       this.controller=new AbortController(); const timeout=setTimeout(()=>this.controller?.abort(),10000);
       try {
@@ -63,4 +75,4 @@ class RemotePublisher {
   }
   stop(){this.closed=true;clearInterval(this.timer);this.controller?.abort();}
 }
-module.exports={RemotePublisher,endpoint,snapshot,uploadInterval};
+module.exports={RemotePublisher,endpoint,snapshot,uploadInterval,notificationSettings};

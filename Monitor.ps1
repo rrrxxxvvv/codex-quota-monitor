@@ -93,7 +93,8 @@ function Update-Alert($events, [bool]$test) {
 . (Join-Path $PSScriptRoot 'Remote.ps1')
 
 try {
-    $main = New-Window 'Codex 额度监控与自动执行' 680 590
+    $appVersion = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'VERSION')).Trim()
+    $main = New-Window ("Codex 额度监控与自动执行 v" + $appVersion) 680 590
     $main.MinHeight = 540
     $panel = New-Object System.Windows.Controls.StackPanel
     $panel.Margin = '28'

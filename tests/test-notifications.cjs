@@ -1,0 +1,10 @@
+const assert=require('node:assert/strict');
+const {notificationSettings,snapshot}=require('../remote.cjs');
+assert.deepEqual(notificationSettings(),{weeklyReset:true,offCycleReset:true,cardExpiry:true,expiryDays:[7,1]});
+assert.deepEqual(notificationSettings({weeklyReset:false,expiryDays:[1,3,3]}).expiryDays,[3,1]);
+for(const expiryDays of [[],[0],[366],[1.5],['7']])assert.throws(()=>notificationSettings({expiryDays}));
+assert.throws(()=>notificationSettings({cardExpiry:'false'}));
+const prefs=notificationSettings({cardExpiry:false,expiryDays:[14,3]});
+const body=snapshot({accountId:'test',checkedAt:new Date().toISOString(),currentWindows:{}},'12345678',prefs);
+assert.deepEqual(body.notifications,prefs);
+console.log('PASS: notification defaults, validation, normalization and upload payload');
