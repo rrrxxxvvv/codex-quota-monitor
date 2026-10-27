@@ -1,0 +1,11 @@
+/data/
+node_modules/
+*.log
+*.zip
+.env
+.env.*
+*.pem
+*.key
+__pycache__/
+.DS_Store
+Thumbs.db
