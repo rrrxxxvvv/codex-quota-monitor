@@ -6,7 +6,18 @@ const {windowsFrom}=require('./quota-core.cjs');
 const {validateConfig,dueJobs,nextTime,beijing,matchesQuota}=require('./schedule-core.cjs');
 const {inspectActivity}=require('./thread-activity.cjs');
 const read=file=>JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));
-function atomic(file,value){fs.writeFileSync(file+'.tmp',JSON.stringify(value,null,2));fs.renameSync(file+'.tmp',file);}
+function atomic(file,value){
+  fs.writeFileSync(file+'.tmp',JSON.stringify(value,null,2));
+  // Windows readers/scanners may briefly deny replacement. Never remove the
+  // last durable state; retry only transient sharing/permission errors.
+  for(let attempt=0;;attempt++){
+    try{fs.renameSync(file+'.tmp',file);return;}
+    catch(e){
+      if(attempt>=5 || !['EPERM','EACCES','EBUSY'].includes(e.code))throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10*2**attempt);
+    }
+  }
+}
 
 class Scheduler {
   constructor(data,options={}){
@@ -150,6 +161,7 @@ class Scheduler {
         }
         if(activity==='unknown')throw new Error('无法可靠确认会话空闲，已停止本次执行。');
       }
+      this.phase(run,'resuming-thread');
       const resumed=await client.request('thread/resume',{threadId:binding.threadId,excludeTurns:true});
       if(resumed.thread.status.type==='active'){
         run.status='skipped';run.message='会话正在执行任务，本次跳过。';this.log(rule.id,run.message);return run;
@@ -203,6 +215,12 @@ class Scheduler {
       run.message+=' 计时是否变化以接口返回的重置时间为准。';
       this.log(rule.id,run.message);
     }catch(e){
+      run.error={message:e.message,rpcMethod:e.rpcMethod ?? null,rpcCode:e.rpcCode ?? null};
+      if(!mutationAttempted && run.phase==='resuming-thread' && e.rpcMethod==='thread/resume' && /already has an active writer\b/i.test(e.message)){
+        run.status='skipped';run.reason='active-writer';
+        run.message='会话被另一个 Codex 客户端占用（即使任务已结束也可能仍占用）。本次跳过，未修改历史、未发送消息，不计次数；规则保持启用。请在占用它的客户端结束使用并释放会话，之后等待下一次触发；仅重新勾选启用不能解除占用。';
+        this.log(rule.id,run.message,'warning');return run;
+      }
       run.status=mutationAttempted?'uncertain':'failed';run.message=e.message;
       this.state.blocked[rule.id]={message:e.message,phase:run.phase,at:new Date().toISOString()};
       this.log(rule.id,e.message,'error');

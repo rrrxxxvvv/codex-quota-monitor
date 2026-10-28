@@ -14,9 +14,9 @@ function codexPath() {
 }
 
 class Client extends EventEmitter {
-  constructor() {
+  constructor(options = {}) {
     super(); this.id=0; this.pending=new Map(); this.dead=false;
-    this.proc=spawn(codexPath(),['app-server','--stdio'],{windowsHide:true,stdio:['pipe','pipe','pipe']});
+    this.proc=spawn(codexPath(),['app-server','--stdio'],{windowsHide:true,stdio:['pipe','pipe','pipe'],env:options.env ?? process.env});
     this.proc.stderr.on('data',()=>{});
     this.proc.stdin.on('error',()=>{});
     readline.createInterface({input:this.proc.stdout}).on('line',line=>{
@@ -30,7 +30,7 @@ class Client extends EventEmitter {
       }
       const req=this.pending.get(msg.id);if(!req)return;
       clearTimeout(req.timer);this.pending.delete(msg.id);
-      if(msg.error) req.reject(Object.assign(new Error(msg.error.message || 'Codex 接口返回错误'),{rpcCode:msg.error.code}));else req.resolve(msg.result);
+      if(msg.error) req.reject(Object.assign(new Error(msg.error.message || 'Codex 接口返回错误'),{rpcCode:msg.error.code,rpcMethod:req.method}));else req.resolve(msg.result);
     });
     this.proc.on('error',e=>this.fail(e));
     this.proc.on('exit',()=>this.fail(new Error('Codex 本地服务已退出')));
@@ -40,7 +40,7 @@ class Client extends EventEmitter {
     if(this.dead)return reject(new Error('Codex 本地服务不可用'));
     const id=++this.id;
     const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error(`${method} 请求超时，结果可能尚未确认`));},timeout);
-    this.pending.set(id,{resolve,reject,timer});
+    this.pending.set(id,{resolve,reject,timer,method});
     this.proc.stdin.write(JSON.stringify({id,method,...(params ? {params} : {})})+'\n');
   });}
   async init(){await this.request('initialize',{clientInfo:{name:'quota_reset_monitor',title:'Codex Quota Monitor',version:fs.readFileSync(path.join(__dirname,'VERSION'),'utf8').trim()}});this.proc.stdin.write(JSON.stringify({method:'initialized',params:{}})+'\n');}

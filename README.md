@@ -1,4 +1,4 @@
-# Codex Quota Monitor v1.5.2
+# Codex Quota Monitor v1.5.3
 
 Windows 桌面额度监控：读取本机已登录 Codex 的额度，额度重置或增加后显示持续置顶提醒；可按时间或额度刷新规则发送自定义消息，并可将额度上传到 AstrBot，通过 QQ 查询和接收通知。
 
@@ -97,6 +97,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Portable.ps1 -Ar
 - HTTP 401：确认两端密钥一致、系统时间正常。
 - HTTP 400：确认两端均为支持 QQ 绑定的版本，QQ 已填写。
 - 未返回某个额度或卡信息：显示未知，不用余额或其他数据推算。
+- `already has an active writer`：另一个 Codex 客户端仍持有该会话的写入连接，即使任务已经完成也可能占用。v1.5.3 会在恢复阶段安全跳过，不计次数、不自动停用；不会强行结束其他客户端或补发错过的时刻。请让占用客户端释放会话，再等下一次触发。仅重新勾选规则不能解除占用。旧版本因此已停用的规则，升级后需手动重新启用一次。
+
+关闭任务页不一定立即释放连接：[官方 app-server 文档](https://learn.chatgpt.com/docs/app-server#unsubscribe-from-a-loaded-thread)说明，最后一个订阅者退出后，服务还有 30 分钟无订阅、无活动的卸载宽限期。若需要立即释放，先确认对应客户端没有其他运行中的任务，再退出该客户端。监控本身通过独立本地服务运行，使用已有本机 Codex 登录，不要求桌面窗口一直打开。
 
 接口或 Codex 版本变化可能影响兼容性。测试覆盖本地额度判断、规则执行、上传重试，以及配套插件的模拟联调；无法保证所有客户端版本均兼容。
 
@@ -114,6 +117,8 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/test-schedule
 ```
 
 上传测试仅使用本机临时 HTTP 服务；调度测试使用模拟 Codex 客户端，不向真实会话发送消息。界面测试需 Windows/WPF。
+
+另可运行 `node tests/test-writer-integration.cjs`。它需要已安装 Codex 可执行文件，但不需要登录账号：测试创建隔离的 Codex 配置与会话目录，连接本机 HTTP 模拟模型，使用真实 app-server 验证双客户端写入冲突、释放占用后编辑首条重发、固定会话和计数上限。它不会读取个人会话或调用真实模型；不等同于验证所有其他电脑上的实际运行状态。
 
 桌面 v1.5.0 的调度增强不改变上传格式，QQ 通知设置继续兼容插件 v1.4.0，无需同步升级插件。
 

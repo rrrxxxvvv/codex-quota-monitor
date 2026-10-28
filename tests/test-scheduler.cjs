@@ -29,7 +29,7 @@ class FakeClient {
  async init(){}close(){}
  async request(method,p){
   const s=this.server;s.calls.push(method);
-  if(s.fail===method)throw new Error('simulated uncertain RPC');
+  if(s.fail===method)throw Object.assign(new Error(s.failMessage || 'simulated uncertain RPC'),{rpcMethod:method,rpcCode:-32600});
   if(method==='account/rateLimits/read')return {accountId:s.account || 'a',rateLimits:{limitId:'codex',primary:{usedPercent:5,resetsAt:2000000000,windowDurationMins:300}}};
   if(method==='thread/start'){s.created++;s.turns=[];return {thread:{id,historyMode:'paginated'}};}
   if(method==='thread/name/set')return {};
@@ -99,6 +99,20 @@ function server(){return {calls:[],turns:[],sent:0,created:0,reverts:0};}
  assert.throws(()=>validateConfig({...config,rules:[{...qr,runLimit:0}]}));
  // Custom text is preserved on first creation, first-turn replacement and quota triggers.
  const cs=server(),custom=setup('custom',cs);
+ const lockedServer=server();lockedServer.turns=[{id:'previous',status:'completed',items:[]}];
+ lockedServer.fail='thread/resume';lockedServer.failMessage=`thread ${id} already has an active writer`;
+ const locked=setup('writer-conflict',lockedServer,id);
+ const lockedRun=await locked.scheduler.execute(locked.r,'locked-first');
+ assert.equal(lockedRun.status,'skipped');assert.equal(lockedRun.reason,'active-writer');
+ assert.equal(locked.scheduler.count(locked.r),0);assert.equal(lockedServer.reverts,0);assert.equal(lockedServer.sent,0);
+ assert.equal(locked.scheduler.state.blocked.morning,undefined);assert.equal(lockedRun.error.rpcMethod,'thread/resume');
+ lockedServer.fail=null;await locked.scheduler.execute(locked.r,'after-unlock');
+ assert.equal(lockedServer.sent,1);assert.equal(lockedServer.reverts,1);locked.scheduler.stop();
+ const lateConflictServer=server();lateConflictServer.turns=[{id:'previous',status:'completed',items:[]}];
+ lateConflictServer.fail='turn/start';lateConflictServer.failMessage=`thread ${id} already has an active writer`;
+ const lateConflict=setup('writer-after-revert',lateConflictServer,id);
+ assert.equal((await lateConflict.scheduler.execute(lateConflict.r,'late-conflict')).status,'uncertain');
+ assert.ok(lateConflict.scheduler.state.blocked.morning);assert.equal(lateConflict.scheduler.count(lateConflict.r),1);lateConflict.scheduler.stop();
  custom.r.message='分析下面的内容：\n保留换行、空格与标点。  ';
  assert.equal((await custom.scheduler.execute(custom.r,'custom-first')).status,'success');
  assert.equal(cs.turns[0].items[0].content[0].text,custom.r.message);
