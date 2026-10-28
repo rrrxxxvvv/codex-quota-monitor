@@ -1,4 +1,4 @@
-# Codex Quota Monitor v1.5.3
+# Codex Quota Monitor v1.5.4
 
 Windows 桌面额度监控：读取本机已登录 Codex 的额度，额度重置或增加后显示持续置顶提醒；可按时间或额度刷新规则发送自定义消息，并可将额度上传到 AstrBot，通过 QQ 查询和接收通知。
 
@@ -90,6 +90,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Portable.ps1 -Ar
 ## 数据与排错
 
 运行配置、密钥、QQ、监控状态、历史备份和日志均在自动生成的 `data/` 中，整个目录已被 Git 忽略。**发布源码或报错截图时不要附上该目录。**
+
+v1.5.4 起，报错区域会显示对应日志或状态文件的完整路径，可选中复制，也可点击“打开日志文件夹”。路径根据实际运行目录生成；正常状态下收起。启动失败弹窗也会显示错误日志路径。
+
+| 情况 | 对应文件（位于程序的 data 目录） |
+| --- | --- |
+| 规则执行报错、会话占用 | `schedule-state.json`（执行记录与错误详情）、`schedule-status.json`（当前状态） |
+| 额度读取失败 | `status.json`（当前错误状态） |
+| AstrBot 上传失败 | `remote-status.json`（当前错误状态） |
+| 界面或保存操作异常 | `ui-errors.log`（发生异常时生成） |
+| 主程序启动失败 | `startup-error.txt` |
+
+提交问题时只提供相关错误条目即可；不要发送 `remote-config.json`，其中包含连接密钥。
 
 - 找不到 Node：安装 Node 并重新启动程序，确认 `node --version` 可用。
 - 连接被拒绝：确认插件已启用、服务已监听、Docker 映射接收端口。

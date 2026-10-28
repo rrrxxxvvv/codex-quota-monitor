@@ -20,8 +20,12 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 
 function Write-UiError($errorValue) {
     try {
-        $entry = [DateTimeOffset]::Now.ToString('o') + ' ' + $errorValue.ToString() + [Environment]::NewLine
+        $message = $errorValue.ToString()
+        $now = [DateTimeOffset]::Now
+        if ($script:lastUiError -eq $message -and $script:lastUiErrorAt -and ($now - $script:lastUiErrorAt).TotalSeconds -lt 60) { return }
+        $entry = $now.ToString('o') + ' ' + $message + [Environment]::NewLine
         [IO.File]::AppendAllText((Join-Path $dataDir 'ui-errors.log'), $entry, $utf8)
+        $script:lastUiError = $message; $script:lastUiErrorAt = $now
     } catch { }
 }
 
@@ -49,6 +53,26 @@ function New-Window($title, $width, $height) {
     $w.MinWidth = 440; $w.MinHeight = 320; $w.Background = '#F5F7FB'
     $w.FontFamily = 'Microsoft YaHei UI'; $w.WindowStartupLocation = 'CenterScreen'
     return $w
+}
+function New-LogLocation($fileNames) {
+    $box = New-Object System.Windows.Controls.StackPanel
+    $box.Margin = '0,8,0,12'
+    $label = New-Text '日志 / 状态文件位置（可选中复制）' 12 '#64748B'
+    $label.Margin = '0,0,0,6'; $box.Children.Add($label) | Out-Null
+    $paths = New-Object System.Windows.Controls.TextBox
+    $paths.IsReadOnly = $true; $paths.TextWrapping = 'Wrap'; $paths.FontSize = 12
+    $paths.Background = '#F8FAFC'; $paths.Foreground = '#475569'; $paths.BorderBrush = '#E2E8F0'; $paths.Padding = '8'
+    $paths.MaxHeight = 115; $paths.VerticalScrollBarVisibility = 'Auto'
+    $paths.Text = (@($fileNames | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $dataDir $_)) }) -join "`r`n")
+    $box.Children.Add($paths) | Out-Null
+    $open = New-Button '打开日志文件夹'; $open.FontSize = 12; $open.Padding = '10,6'; $open.HorizontalAlignment = 'Left'
+    $open.Tag = [IO.Path]::GetFullPath($dataDir)
+    $open.Add_Click({
+        try { Start-Process explorer.exe -ArgumentList ('"' + $this.Tag + '"') -WindowStyle Hidden }
+        catch { Write-UiError $_; [System.Windows.MessageBox]::Show(('无法打开文件夹，请手动访问：' + $this.Tag), '日志位置') | Out-Null }
+    })
+    $box.Children.Add($open) | Out-Null
+    return $box
 }
 function Write-Acknowledgements {
     $json = ConvertTo-Json -InputObject @($script:acknowledged) -Compress
@@ -110,6 +134,8 @@ try {
     $script:health = New-Text '正在连接本机 Codex 服务…' 14 '#356649'
     $script:details = New-Text '' 16 '#182848'
     $panel.Children.Add($script:health) | Out-Null
+    $script:monitorLogLocation = New-LogLocation @('status.json', 'ui-errors.log')
+    $script:monitorLogLocation.Visibility = 'Collapsed'; $panel.Children.Add($script:monitorLogLocation) | Out-Null
     $scroll = New-Object System.Windows.Controls.ScrollViewer
     $scroll.Height = 205; $scroll.VerticalScrollBarVisibility = 'Auto'; $scroll.Content = $script:details
     $panel.Children.Add($scroll) | Out-Null
@@ -126,7 +152,8 @@ try {
     $panel.Children.Add($buttons) | Out-Null
     $hint = New-Text '关闭此主窗口会收起到托盘；“退出监控”才会停止。电脑睡眠或关机期间无法检测，恢复运行后继续检查。' 12 '#53627B'
     $hint.Margin = '0,18,0,0'; $panel.Children.Add($hint) | Out-Null
-    $main.Content = $panel
+    $mainScroll = New-Object System.Windows.Controls.ScrollViewer
+    $mainScroll.VerticalScrollBarVisibility = 'Auto'; $mainScroll.Content = $panel; $main.Content = $mainScroll
     $main.Add_Closing({ if (-not $script:exiting) { $_.Cancel = $true; $main.Hide() } })
 
     $tray = New-Object System.Windows.Forms.NotifyIcon
@@ -156,14 +183,20 @@ try {
         try {
             $showScheduleFile = Join-Path $dataDir 'show-schedule'
             if ([IO.File]::Exists($showScheduleFile)) { [IO.File]::Delete($showScheduleFile); Show-ScheduleWindow }
-            if ($script:backend.HasExited) { $script:health.Text = '监控进程已退出，请退出此程序后重新启动。'; $script:health.Foreground = '#B33B32'; return }
+            if ($script:backend.HasExited) {
+                $script:health.Text = '监控进程已退出，请退出此程序后重新启动。'; $script:health.Foreground = '#B33B32'
+                if (-not $script:backendExitLogged) { Write-UiError ('监控进程退出，退出码：' + $script:backend.ExitCode); $script:backendExitLogged = $true }
+                $script:monitorLogLocation.Visibility = 'Visible'; return
+            }
             $statusPath = Join-Path $dataDir 'status.json'
             if (-not [IO.File]::Exists($statusPath)) { return }
             $s = [IO.File]::ReadAllText($statusPath) | ConvertFrom-Json
             if ($s.error) {
+                $script:monitorLogLocation.Visibility = 'Visible'
                 $script:health.Text = "读取失败，正在自动重试（显示上次成功数据）：$($s.error)"
                 $script:health.Foreground = '#B33B32'
             } elseif ($s.checkedAt) {
+                $script:monitorLogLocation.Visibility = 'Collapsed'
                 $checked = [DateTimeOffset]::Parse($s.checkedAt)
                 $stale = ([DateTimeOffset]::Now - $checked).TotalSeconds -gt 180
                 $script:health.Text = if ($stale) { '数据暂未更新，等待下一次成功读取。上次：' + $checked.ToLocalTime().ToString('MM-dd HH:mm:ss') } else { '监控中 · 最近成功检查：' + $checked.ToLocalTime().ToString('MM-dd HH:mm:ss') }
@@ -189,7 +222,7 @@ try {
                 if (-not $script:popup) { Show-Alert $pending $false }
                 elseif (-not $script:popup.Tag.Test) { Update-Alert $pending $false }
             }
-        } catch { $script:health.Text = '正在等待完整状态数据…' }
+        } catch { Write-UiError $_; $script:health.Text = '状态读取异常，正在重试。'; $script:monitorLogLocation.Visibility = 'Visible' }
     })
     $timer.Start()
     $app = New-Object Windows.Application
@@ -198,8 +231,11 @@ try {
         param($sender, $eventArgs)
         $eventArgs.Handled = $true
         Write-UiError $eventArgs.Exception
-        if ($script:scheduleFeedback) { $script:scheduleFeedback.Text = '操作未完成：' + $eventArgs.Exception.GetBaseException().Message }
-        if ($script:health) { $script:health.Text = '界面操作未完成，监控继续运行。详情已记录。' }
+        $logPath = [IO.Path]::GetFullPath((Join-Path $dataDir 'ui-errors.log'))
+        if ($script:scheduleFeedback) { $script:scheduleFeedback.Text = '操作未完成：' + $eventArgs.Exception.GetBaseException().Message + "`n日志：" + $logPath }
+        if ($script:health) { $script:health.Text = '界面操作未完成，监控继续运行。日志：' + $logPath }
+        if ($script:monitorLogLocation) { $script:monitorLogLocation.Visibility = 'Visible' }
+        if ($script:scheduleLogLocation) { $script:scheduleLogLocation.Visibility = 'Visible' }
     })
     if ($OpenSchedule -and -not $SmokeTest) { $main.Add_ContentRendered({ Show-ScheduleWindow }) }
     if ($SmokeTest) {
@@ -223,7 +259,7 @@ try {
     $app.Run($main) | Out-Null
 } catch {
     [IO.File]::WriteAllText((Join-Path $dataDir 'startup-error.txt'), $_.ToString(), $utf8)
-    [System.Windows.MessageBox]::Show($_.Exception.Message, '额度监控启动失败') | Out-Null
+    [System.Windows.MessageBox]::Show(($_.Exception.Message + "`n`n错误日志：" + [IO.Path]::GetFullPath((Join-Path $dataDir 'startup-error.txt'))), '额度监控启动失败') | Out-Null
 } finally {
     if ($timer) { $timer.Stop() }
     if ($tray) { $tray.Visible = $false; $tray.Dispose() }

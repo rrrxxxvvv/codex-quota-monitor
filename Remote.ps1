@@ -35,8 +35,10 @@
     $expiryDays = New-RuleTextBox; $expiryDays.Text = '7, 1'; $panel.Children.Add($expiryDays) | Out-Null
     $panel.Children.Add((New-Text '每个阈值 1–365 天，最多 10 项；每张卡在每档只提醒一次。Bot 私聊中的关闭推送仍是总开关；额度查询不受影响。' 12 '#53627B')) | Out-Null
     $file = Join-Path $dataDir 'remote-config.json'
+    $c = $null; $configReadError = ''
     if ([IO.File]::Exists($file)) {
-        try { $c = [IO.File]::ReadAllText($file) | ConvertFrom-Json; $enabled.IsChecked = [bool]$c.enabled; $address.Text = $c.address; $secret.Password = $c.secret } catch {}
+        try { $c = [IO.File]::ReadAllText($file) | ConvertFrom-Json; $enabled.IsChecked = [bool]$c.enabled; $address.Text = $c.address; $secret.Password = $c.secret }
+        catch { Write-UiError ('上传配置读取失败：remote-config.json；异常类型 ' + $_.Exception.GetType().Name); $configReadError = "上传配置读取失败。`n日志：" + [IO.Path]::GetFullPath((Join-Path $dataDir 'ui-errors.log')) }
         if ($null -ne $c.uploadIntervalSeconds) { $interval.Text = [string]$c.uploadIntervalSeconds }
         if ($c.qq) { $qq.Text = [string]$c.qq }
         if ($c.notifications) {
@@ -44,7 +46,7 @@
             if ($c.notifications.expiryDays) { $expiryDays.Text = $c.notifications.expiryDays -join ', ' }
         }
     }
-    $feedback = New-Text '' 13 '#53627B'
+    $feedback = New-Text $configReadError 13 '#53627B'
     $save = New-Button '保存上传设置'
     $save.Tag = @{enabled=$enabled;address=$address;qq=$qq;secret=$secret;interval=$interval;notices=$noticeBoxes;expiryDays=$expiryDays;feedback=$feedback;file=$file}
     $save.Add_Click({
@@ -72,21 +74,30 @@
             [IO.File]::WriteAllText(($v.file + '.tmp'), ($payload | ConvertTo-Json -Depth 6), $utf8)
             Move-Item -LiteralPath ($v.file + '.tmp') -Destination $v.file -Force
             $v.feedback.Text = '已保存，上传设置会自动生效。'
-        } catch { $v.feedback.Text = $_.Exception.Message }
+        } catch { Write-UiError $_; $v.feedback.Text = $_.Exception.Message + "`n日志：" + [IO.Path]::GetFullPath((Join-Path $dataDir 'ui-errors.log')) }
     })
     $panel.Children.Add($save) | Out-Null
     $panel.Children.Add($feedback) | Out-Null
     $statusText = New-Text '' 13 '#53627B'; $panel.Children.Add($statusText) | Out-Null
+    $script:remoteLogLocation = New-LogLocation @('remote-status.json', 'ui-errors.log')
+    $script:remoteLogLocation.Visibility = 'Collapsed'; $panel.Children.Add($script:remoteLogLocation) | Out-Null
     $timer = New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromSeconds(2)
     $script:remoteStatusText = $statusText
-    $timer.Add_Tick({
-        try {
-            $s = [IO.File]::ReadAllText((Join-Path $dataDir 'remote-status.json')) | ConvertFrom-Json
-            $script:remoteStatusText.Text = if (-not $s.enabled) { '上传未启用。' } elseif ($s.error) { '上传状态：' + $s.error } else { '已上传采集时间：' + [DateTimeOffset]::Parse($s.checkedAt).ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd HH:mm:ss') }
-        } catch { $script:remoteStatusText.Text = '等待上传状态…' }
-    })
+    $timer.Add_Tick({ Update-RemoteStatus })
+    Update-RemoteStatus
     $timer.Start(); $w.Tag = $timer
     $w.Add_Closed({ $this.Tag.Stop(); $script:remoteWindow = $null })
     $w.Show()
+}
+function Update-RemoteStatus {
+    try {
+        $s = [IO.File]::ReadAllText((Join-Path $dataDir 'remote-status.json')) | ConvertFrom-Json
+        $script:remoteLogLocation.Visibility = if ($s.error) { 'Visible' } else { 'Collapsed' }
+        $script:remoteStatusText.Text = if (-not $s.enabled) { '上传未启用。' } elseif ($s.error) { '上传状态：' + $s.error } else { '已上传采集时间：' + [DateTimeOffset]::Parse($s.checkedAt).ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd HH:mm:ss') }
+    } catch {
+        if ([IO.File]::Exists((Join-Path $dataDir 'remote-status.json'))) {
+            Write-UiError $_; $script:remoteStatusText.Text = '上传状态读取异常，正在重试。'; $script:remoteLogLocation.Visibility = 'Visible'
+        } else { $script:remoteStatusText.Text = '等待上传状态…' }
+    }
 }

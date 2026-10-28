@@ -6,7 +6,7 @@ $dataDir = Join-Path ([IO.Path]::GetTempPath()) ('ui-test-' + [Guid]::NewGuid().
 $utf8 = New-Object Text.UTF8Encoding($false)
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $product 'Monitor.ps1'), [ref]$tokens, [ref]$errors)
-foreach ($name in @('New-Text', 'New-Button', 'New-Window', 'Write-UiError')) {
+foreach ($name in @('New-Text', 'New-Button', 'New-Window', 'Write-UiError', 'New-LogLocation')) {
     $functionAst = $ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name}, $true)
     . ([ScriptBlock]::Create($functionAst.Extent.Text))
 }
@@ -122,6 +122,33 @@ try {
     if ($script:ruleTimes.Text -ne '08:05') { throw 'Time picker or dedup failed' }
     Select-Rule $originalId
     Write-Output 'PASS: date/time pickers, multiple dates, interval units, custom multiline text, once progress, persistence and input validation.'
+    $errorStatus = @{ running = $true; error = 'Simulated scheduler failure'; busy = $false; logs = @(); rules = @() }
+    [IO.File]::WriteAllText((Join-Path $dataDir 'schedule-status.json'), ($errorStatus | ConvertTo-Json -Depth 12), $utf8)
+    Update-ScheduleStatus
+    if ($script:scheduleLogLocation.Visibility -ne 'Visible') { throw 'Error log location is hidden' }
+    $pathBox = @($script:scheduleLogLocation.Children | Where-Object { $_ -is [Windows.Controls.TextBox] })[0]
+    foreach ($logFile in @('schedule-state.json', 'schedule-status.json', 'ui-errors.log')) {
+        if (-not $pathBox.Text.Contains([IO.Path]::GetFullPath((Join-Path $dataDir $logFile)))) { throw 'Log location is not absolute or is missing' }
+    }
+    if (-not $pathBox.IsReadOnly) { throw 'Log paths should be selectable but read-only' }
+    function Start-Process { param($FilePath, $ArgumentList, $WindowStyle) $script:openedLogFolder = @{file=$FilePath;args=$ArgumentList} }
+    Click-Button '打开日志文件夹'
+    if ($script:openedLogFolder.file -ne 'explorer.exe' -or $script:openedLogFolder.args -ne ('"' + [IO.Path]::GetFullPath($dataDir) + '"')) { throw 'Wrong folder-open request' }
+    Remove-Item Function:Start-Process
+    Write-Output 'PASS: error reveals selectable absolute diagnostic paths and folder-open action targets the actual data directory.'
+    . (Join-Path $product 'Remote.ps1')
+    [IO.File]::WriteAllText((Join-Path $dataDir 'remote-status.json'), '{"enabled":true,"error":"Simulated upload failure"}', $utf8)
+    Show-RemoteWindow
+    if ($script:remoteLogLocation.Visibility -ne 'Visible' -or $script:remoteStatusText.Text -notlike '*Simulated upload failure*') { throw 'Upload diagnostics not visible' }
+    $remotePaths = @($script:remoteLogLocation.Children | Where-Object { $_ -is [Windows.Controls.TextBox] })[0]
+    if (-not $remotePaths.Text.Contains([IO.Path]::GetFullPath((Join-Path $dataDir 'remote-status.json')))) { throw 'Upload status path missing' }
+    [IO.File]::WriteAllText((Join-Path $dataDir 'remote-status.json'), '{"enabled":false,"error":null}', $utf8)
+    Update-RemoteStatus
+    if ($script:remoteLogLocation.Visibility -ne 'Collapsed') { throw 'Healthy upload diagnostics did not collapse' }
+    $script:remoteWindow.Close()
+    Write-Output 'PASS: upload error location is visible and collapses after recovery.'
+    $script:scheduleWindow.UpdateLayout()
+    $script:scheduleWindow.Content.Children[-1].Children[-1].ScrollToBottom()
     $script:scheduleWindow.UpdateLayout()
     $visual = $script:scheduleWindow
     $bitmap = New-Object Windows.Media.Imaging.RenderTargetBitmap([int]$visual.ActualWidth, [int]$visual.ActualHeight, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)

@@ -99,8 +99,9 @@ function Update-ScheduleStatus {
         if (-not [IO.File]::Exists($file)) { $script:ruleStatus.Text = '正在等待定时服务…'; return }
         $status = [IO.File]::ReadAllText($file) | ConvertFrom-Json
         $script:lastScheduleStatus = $status
+        if ($script:scheduleLogLocation) { $script:scheduleLogLocation.Visibility = 'Collapsed' }
         Update-TriggerProgress
-        if ($status.error) { $script:ruleStatus.Text = '定时服务异常：' + $status.error; return }
+        if ($status.error) { $script:ruleStatus.Text = '定时服务异常：' + $status.error; $script:scheduleLogLocation.Visibility = 'Visible'; return }
         # The UI owns the rule file. Merge bindings into saved rule objects only;
         # never reload the editor or overwrite unsaved name/time changes.
         $bindingsChanged = $false
@@ -124,6 +125,7 @@ function Update-ScheduleStatus {
         $info = New-Object 'System.Collections.Generic.List[string]'
         if (-not $rule) { $info.Add('新规则默认关闭。保存后可单独启用。') }
         else {
+            if ($rule.blocked -or $rule.lastRun.status -in @('failed', 'uncertain') -or $rule.lastRun.reason -eq 'active-writer') { $script:scheduleLogLocation.Visibility = 'Visible' }
             if ($rule.binding) {
                 $script:ruleThread.Text = [string]$rule.binding.threadId
                 $script:ruleThread.IsReadOnly = $true
@@ -160,6 +162,7 @@ function Update-ScheduleStatus {
             "$time  $($_.message)"
         }) -join "`n")
     } catch {
+        if ($script:scheduleLogLocation) { $script:scheduleLogLocation.Visibility = 'Visible' }
         $script:ruleStatus.Text = '状态更新失败，正在重试：' + $_.Exception.Message
         if (Get-Command Write-UiError -ErrorAction SilentlyContinue) { Write-UiError $_ }
     }
@@ -215,7 +218,7 @@ function Show-ScheduleWindow {
             $config = [IO.File]::ReadAllText($file) | ConvertFrom-Json
             foreach ($rule in $config.rules) { $script:scheduleRules.Add($rule) }
         }
-    } catch { [System.Windows.MessageBox]::Show('规则文件无法读取，已保留原文件，请先排查。', '定时规则') | Out-Null; return }
+    } catch { Write-UiError $_; [System.Windows.MessageBox]::Show(("规则文件无法读取，已保留原文件。`n错误日志：" + [IO.Path]::GetFullPath((Join-Path $dataDir 'ui-errors.log')) + "`n规则文件：" + [IO.Path]::GetFullPath($file)), '定时规则') | Out-Null; return }
     $window = New-Window '自动执行规则' 1040 860
     $window.MinWidth = 820; $window.MinHeight = 620
     $window.Resources = [Windows.Markup.XamlReader]::Parse(@'
@@ -344,7 +347,7 @@ function Show-ScheduleWindow {
             $value = (Get-RuleDateTime $script:datePicker).Replace('T', ' ')
             if (-not $script:ruleDates.Items.Contains($value)) { $script:ruleDates.Items.Add($value) | Out-Null }
             $script:scheduleFeedback.Text = ''
-        } catch { $script:scheduleFeedback.Text = $_.Exception.Message }
+        } catch { Write-UiError $_; $script:scheduleFeedback.Text = $_.Exception.Message + "`n日志：" + [IO.Path]::GetFullPath((Join-Path $dataDir 'ui-errors.log')) }
     })
     $removeDate = New-Button '移除所选时间'
     $removeDate.Add_Click({ if ($null -ne $script:ruleDates.SelectedItem) { $script:ruleDates.Items.Remove($script:ruleDates.SelectedItem) } })
@@ -453,12 +456,14 @@ function Show-ScheduleWindow {
             if ($reenabling) { Send-ScheduleCommand 'unblock' }
             foreach ($item in $script:ruleList.Items) { if ($item.Tag -eq $id) { $script:ruleList.SelectedItem = $item; break } }
             $script:scheduleFeedback.Text = '已保存。启用后，从下一次符合触发条件时开始执行。'
-        } catch { $script:scheduleFeedback.Text = $_.Exception.Message }
+        } catch { Write-UiError $_; $script:scheduleFeedback.Text = $_.Exception.Message + "`n日志：" + [IO.Path]::GetFullPath((Join-Path $dataDir 'ui-errors.log')) }
     })
     $script:scheduleFeedback = New-Text '' 13 '#356649'
     $script:scheduleFeedback.Margin = '0,8,0,0'; $footerContent.Children.Add($script:scheduleFeedback) | Out-Null
     $editor = New-RuleSection $editorRoot '执行状态'
     $script:ruleStatus = New-Text '' 13 '#182848'; $editor.Children.Add($script:ruleStatus) | Out-Null
+    $script:scheduleLogLocation = New-LogLocation @('schedule-state.json', 'schedule-status.json', 'ui-errors.log')
+    $script:scheduleLogLocation.Visibility = 'Collapsed'; $editor.Children.Add($script:scheduleLogLocation) | Out-Null
     $logExpander = New-Object System.Windows.Controls.Expander
     $logExpander.Header = '最近执行记录'; $logExpander.FontSize = 13
     $script:ruleLog = New-Text '' 12 '#53627B'; $script:ruleLog.Margin = '0,10,0,0'; $logExpander.Content = $script:ruleLog
