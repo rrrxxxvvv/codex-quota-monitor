@@ -24,7 +24,7 @@ class Client extends EventEmitter {
       if (msg.method) {
         if(msg.id !== undefined) {
           // This client never grants tool permissions or asks the model to operate the computer.
-          this.proc.stdin.write(JSON.stringify({id:msg.id,error:{code:-32601,message:'This greeting-only client does not handle tool or permission requests.'}})+'\n');
+          this.proc.stdin.write(JSON.stringify({id:msg.id,error:{code:-32601,message:'This scheduled-message client does not handle tool or permission requests.'}})+'\n');
         } else this.emit('notification',msg);
         return;
       }

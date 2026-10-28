@@ -11,6 +11,8 @@ function atomic(file,value){fs.writeFileSync(file+'.tmp',JSON.stringify(value,nu
 class Scheduler {
   constructor(data,options={}){
     this.data=data;this.makeClient=options.makeClient || (()=>new Client());this.inspectActivity=options.inspectActivity || inspectActivity;
+    this.confirmationTimeoutMs=options.confirmationTimeoutMs ?? 10000;
+    this.activeRuns=new Map();
     fs.mkdirSync(data,{recursive:true});
     this.configFile=path.join(data,'schedule-rules.json');
     this.stateFile=path.join(data,'schedule-state.json');
@@ -57,7 +59,31 @@ class Scheduler {
     }
     this.state.logs=this.state.logs.slice(-150);this.save();this.publish();
   }
-  publish(){atomic(this.statusFile,{running:!this.stopped,busy:this.busy,error:this.error,checkedAt:new Date().toISOString(),rules:this.config.rules.map(r=>({...r,enabled:r.enabled && !this.exhausted(r) && !this.state.blocked[r.id],autoDisabled:this.exhausted(r),triggerCount:this.count(r),binding:this.state.bindings[r.id] || null,blocked:this.state.blocked[r.id] || null,nextAt:this.exhausted(r)||this.state.blocked[r.id]?null:nextTime(r),lastRun:Object.values(this.state.runs).filter(x=>x.ruleId===r.id).sort((a,b)=>b.at.localeCompare(a.at))[0] || null})),logs:this.state.logs.slice(-50)});}
+  publish(){atomic(this.statusFile,{running:!this.stopped,busy:this.busy||this.activeRuns.size>0,error:this.error,checkedAt:new Date().toISOString(),rules:this.config.rules.map(r=>({...r,enabled:r.enabled && !this.exhausted(r) && !this.state.blocked[r.id],autoDisabled:this.exhausted(r),triggerCount:this.count(r),binding:this.state.bindings[r.id] || null,blocked:this.state.blocked[r.id] || null,nextAt:this.exhausted(r)||this.state.blocked[r.id]?null:nextTime(r),lastRun:Object.values(this.state.runs).filter(x=>x.ruleId===r.id).sort((a,b)=>b.at.localeCompare(a.at))[0] || null})),logs:this.state.logs.slice(-50)});}
+  async pollActiveRuns(){
+    for(const [ruleId,active] of this.activeRuns){
+      if(active.checking)continue;
+      active.checking=true;
+      const {client,run}=active;
+      try{
+        const page=await client.request('thread/turns/list',{threadId:run.threadId,sortDirection:'asc',limit:3,itemsView:'full'});
+        if(this.stopped)return;
+        const turn=page.data.find(t=>t.id===run.turnId);
+        if(!turn)throw new Error('无法找到已发送的任务，请检查会话；不会自动重发。');
+        if(turn.status==='inProgress')continue;
+        if(turn.status!=='completed')throw new Error(`任务结束状态为 ${turn.status}：${turn.error?.message || '请检查会话'}`);
+        run.status='success';run.phase='complete';run.message='自定义消息对应的任务已完成。';
+        this.log(ruleId,run.message);
+      }catch(e){
+        if(this.stopped)return;
+        run.status='uncertain';run.message=e.message;
+        this.state.blocked[ruleId]={message:e.message,phase:run.phase,at:new Date().toISOString()};this.log(ruleId,e.message,'error');
+      }finally{
+        active.checking=false;
+        if(run.status!=='running'){client.close();this.activeRuns.delete(ruleId);this.save();this.publish();}
+      }
+    }
+  }
   phase(run,phase){run.phase=phase;this.save();this.publish();}
   async allTurns(client,threadId){
     let cursor=null,turns=[];
@@ -76,6 +102,9 @@ class Scheduler {
     this.busy=true;
     const run={ruleId:rule.id,at:new Date().toISOString(),scheduledAt,status:'running',phase:'checking',threadId:null,message:'正在检查账号与会话'};
     this.state.runs[key]=run;this.save();this.publish();
+    if(this.activeRuns.has(rule.id)){
+      run.status='skipped';run.message='此规则的上次任务仍在执行，本次跳过。';this.log(rule.id,run.message);this.busy=false;this.publish();return run;
+    }
     const client=this.makeClient();this.client=client;
     let mutationAttempted=false;
     try{
@@ -148,22 +177,28 @@ class Scheduler {
       // exceed the user's maximum by retrying after restart.
       this.state.triggerCounts[rule.id]={activationId:rule.activationId ?? 'legacy',count:this.count(rule)+1};
       run.triggerNumber=this.count(rule);this.save();
-      const response=await client.request('turn/start',{threadId:binding.threadId,clientUserMessageId:randomUUID(),input:[{type:'text',text:'你好'}]});
+      const message=rule.message ?? '你好';
+      const response=await client.request('turn/start',{threadId:binding.threadId,clientUserMessageId:randomUUID(),input:[{type:'text',text:message}]});
       run.turnId=response.turn.id;this.phase(run,'waiting');
       let completed=null;
-      const deadline=Date.now()+120000;
+      const deadline=Date.now()+this.confirmationTimeoutMs;
       while(!this.stopped && Date.now()<deadline){
         const page=await client.request('thread/turns/list',{threadId:binding.threadId,sortDirection:'asc',limit:3,itemsView:'full'});
         const turn=page.data.find(t=>t.id===run.turnId);
         if(turn && turn.status!=='inProgress'){completed=turn;break;}
         await new Promise(resolve=>setTimeout(resolve,1000));
       }
-      if(!completed)throw new Error('已提交消息，但未能确认执行完成；不会自动重复发送。');
-      if(completed.status!=='completed')throw new Error(`消息已提交但状态为 ${completed.status}：${completed.error?.message || '请检查会话'}`);
+      if(completed && completed.status!=='completed')throw new Error(`消息已提交但状态为 ${completed.status}：${completed.error?.message || '请检查会话'}`);
       const final=await client.request('thread/turns/list',{threadId:binding.threadId,sortDirection:'asc',limit:3,itemsView:'full'});
       const users=final.data.flatMap(t=>t.items).filter(i=>i.type==='userMessage');
-      if(final.data.length!==1 || final.nextCursor || users.length!==1 || users[0].content.filter(x=>x.type==='text').map(x=>x.text).join('')!=='你好')throw new Error('发送后会话历史与预期不符，请核对；已暂停该规则。');
-      run.status='success';run.phase='complete';run.message=created?'已创建并绑定专用会话，发送“你好”成功。':'已在原会话编辑首条并重新发送“你好”；当前历史只有一轮。';
+      if(final.data.length!==1 || final.nextCursor || final.data[0].id!==run.turnId || users.length!==1 || users[0].content.filter(x=>x.type==='text').map(x=>x.text).join('')!==message)throw new Error('发送后会话历史与预期不符，请核对；已暂停该规则。');
+      const currentTurn=final.data[0];
+      if(!['completed','inProgress'].includes(currentTurn.status))throw new Error(`消息已提交但状态为 ${currentTurn.status}：${currentTurn.error?.message || '请检查会话'}`);
+      run.status='success';run.phase='complete';run.message=created?'已创建并绑定专用会话，自定义消息发送成功。':'已在原会话编辑首条并重发自定义消息；当前历史只有一轮。';
+      if(currentTurn.status==='inProgress'){
+        run.status='running';run.phase='waiting';run.message+='任务仍在运行，后续触发会先检查是否空闲。';
+        this.activeRuns.set(rule.id,{client,run,checking:false});
+      }
       try{run.after=windowsFrom(await client.request('account/rateLimits/read'));}catch(e){run.quotaError='消息已完成，但额度读取失败：'+e.message;}
       run.message+=' 计时是否变化以接口返回的重置时间为准。';
       this.log(rule.id,run.message);
@@ -172,7 +207,7 @@ class Scheduler {
       this.state.blocked[rule.id]={message:e.message,phase:run.phase,at:new Date().toISOString()};
       this.log(rule.id,e.message,'error');
     }finally{
-      this.save();client.close();this.client=null;this.busy=false;this.publish();
+      this.save();if(!this.activeRuns.has(rule.id))client.close();this.client=null;this.busy=false;this.publish();
     }
     return run;
   }
@@ -217,8 +252,8 @@ class Scheduler {
     }
     for(const job of dueJobs(this.config,this.state,Date.now())){
       this.refresh();
-      const freshRule=this.config.rules.find(x=>x.id===job.rule.id && x.enabled && x.type==='daily');
-      if(this.error || !freshRule || this.exhausted(freshRule) || !freshRule.times.includes(beijing().time))continue;
+      const freshRule=dueJobs(this.config,this.state,Date.now()).find(x=>x.key===job.key)?.rule;
+      if(this.error || !freshRule || this.exhausted(freshRule))continue;
       if(job.scheduledAt!==`${beijing().date} ${beijing().time}`){this.log(job.rule.id,'等待其他规则期间已错过该时刻，本次不补发。');continue;}
       await this.execute(freshRule,job.key,job.scheduledAt);
     }
@@ -227,7 +262,14 @@ class Scheduler {
     for(const [key,at] of Object.entries(this.state.quotaHandled))if(at<Date.now()-35*86400000)delete this.state.quotaHandled[key];
     this.save();this.publish();
   }
-  start(){this.timer=setInterval(()=>this.tick().catch(e=>{this.error=e.message;this.publish();}),5000);this.tick().catch(e=>{this.error=e.message;this.publish();});}
-  stop(){this.stopped=true;clearInterval(this.timer);this.client?.close();this.publish();}
+  start(){this.timer=setInterval(()=>{this.pollActiveRuns().catch(e=>{this.error=e.message;this.publish();});this.tick().catch(e=>{this.error=e.message;this.publish();});},5000);this.tick().catch(e=>{this.error=e.message;this.publish();});}
+  stop(){
+    this.stopped=true;clearInterval(this.timer);this.client?.close();
+    for(const [ruleId,{client,run}] of this.activeRuns){
+      run.status='uncertain';run.message='监控退出时任务尚未确认完成，请检查会话；不会自动重发。';
+      this.state.blocked[ruleId]={message:run.message,phase:run.phase,at:new Date().toISOString()};client.close();
+    }
+    this.activeRuns.clear();this.save();this.publish();
+  }
 }
 module.exports={Scheduler,atomic};

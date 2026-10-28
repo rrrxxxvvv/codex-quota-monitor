@@ -14,7 +14,9 @@ function Refresh-RuleList {
         $condition = if ($rule.type -eq 'quotaReset') {
             $scope = switch ($rule.quotaWindow) { 'fiveHour' { '五小时' }; 'weekly' { '每周' }; default { '任一额度' } }
             "额度刷新 · $scope"
-        } else { '每日定时 · ' + ($rule.times -join '、') }
+        } elseif ($rule.type -eq 'dates') { '指定日期 · ' + (@($rule.dates).Count) + ' 个时刻' }
+        elseif ($rule.type -eq 'interval') { "间隔重复 · 每 $($rule.intervalMinutes) 分钟" }
+        else { '每日定时 · ' + ($rule.times -join '、') }
         $item.Content = "$($rule.name)  [$stateLabel]`n$condition"
         $item.Tag = $rule.id; $item.Padding = '8'; $item.Margin = '0,0,0,5'
         $script:ruleList.Items.Add($item) | Out-Null
@@ -22,9 +24,10 @@ function Refresh-RuleList {
 }
 function Update-RuleTypeFields {
     if (-not $script:dailyFields -or -not $script:quotaFields) { return }
-    $isQuota = $script:ruleType.SelectedIndex -eq 1
-    $script:dailyFields.Visibility = if ($isQuota) { 'Collapsed' } else { 'Visible' }
-    $script:quotaFields.Visibility = if ($isQuota) { 'Visible' } else { 'Collapsed' }
+    $script:dailyFields.Visibility = if ($script:ruleType.SelectedIndex -eq 0) { 'Visible' } else { 'Collapsed' }
+    $script:quotaFields.Visibility = if ($script:ruleType.SelectedIndex -eq 1) { 'Visible' } else { 'Collapsed' }
+    if ($script:datesFields) { $script:datesFields.Visibility = if ($script:ruleType.SelectedIndex -eq 2) { 'Visible' } else { 'Collapsed' } }
+    if ($script:intervalFields) { $script:intervalFields.Visibility = if ($script:ruleType.SelectedIndex -eq 3) { 'Visible' } else { 'Collapsed' } }
 }
 function Update-RunLimitFields {
     if ($script:runLimitBox) { $script:runLimitBox.Visibility = if ($script:runMode.SelectedIndex -eq 1) { 'Visible' } else { 'Collapsed' } }
@@ -39,23 +42,34 @@ function Update-TriggerProgress {
     $liveActivation = if ($live.activationId) { $live.activationId } else { 'legacy' }
     if ($saved -and $live -and $savedActivation -eq $liveActivation) { $count = [int]$live.triggerCount }
     $limitText = if ($script:runLimit) { $script:runLimit.Text.Trim() } else { '' }
-    $script:triggerProgress.Text = "已触发 $count / $limitText 次"
+    $script:triggerProgress.Text = switch ($script:runMode.SelectedIndex) { 1 { "已触发 $count / $limitText 次" }; 2 { "已触发 $count / 1 次" }; default { "已触发 $count 次" } }
 }
 function Select-Rule($id) {
     $script:editingRuleId = $id
     $rule = @($script:scheduleRules | Where-Object { $_.id -eq $id }) | Select-Object -First 1
+    $script:ruleDates.Items.Clear()
+    Set-RuleDateTime $script:datePicker ([DateTime]::UtcNow.AddHours(8).AddMinutes(5).ToString('yyyy-MM-ddTHH:mm'))
+    Set-RuleDateTime $script:intervalPicker ([DateTime]::UtcNow.AddHours(8).AddMinutes(5).ToString('yyyy-MM-ddTHH:mm'))
+    $script:intervalValue.Text = '5'; $script:intervalUnit.SelectedIndex = 1
     if ($rule) {
         $script:ruleName.Text = $rule.name
         $script:ruleTimes.Text = $rule.times -join ', '
         $script:ruleThread.Text = $rule.existingThreadId
         $script:ruleEnabled.IsChecked = $rule.enabled
-        $script:ruleType.SelectedIndex = if ($rule.type -eq 'quotaReset') { 1 } else { 0 }
+        $script:ruleType.SelectedIndex = switch ($rule.type) { 'quotaReset' { 1 }; 'dates' { 2 }; 'interval' { 3 }; default { 0 } }
+        $script:ruleMessage.Text = if ($null -ne $rule.message) { $rule.message } else { '你好' }
+        foreach ($date in $rule.dates) { $script:ruleDates.Items.Add($date.Replace('T', ' ')) | Out-Null }
+        if ($rule.type -eq 'interval') {
+            Set-RuleDateTime $script:intervalPicker $rule.startAt
+            $script:intervalValue.Text = [string]$rule.intervalMinutes; $script:intervalUnit.SelectedIndex = 0
+        }
         $script:quotaWindow.SelectedIndex = switch ($rule.quotaWindow) { 'fiveHour' { 0 }; 'weekly' { 1 }; default { 2 } }
-        $script:runMode.SelectedIndex = if ($null -ne $rule.runLimit) { 1 } else { 0 }
+        $script:runMode.SelectedIndex = if ($rule.runLimit -eq 1) { 2 } elseif ($null -ne $rule.runLimit) { 1 } else { 0 }
         $script:runLimit.Text = if ($null -ne $rule.runLimit) { [string]$rule.runLimit } else { '1' }
     } else {
         $script:ruleName.Text = ''
         $script:ruleTimes.Text = ''
+        $script:ruleMessage.Text = '你好'
         $script:ruleThread.Text = ''
         $script:ruleEnabled.IsChecked = $false
         $script:ruleType.SelectedIndex = 0
@@ -122,6 +136,7 @@ function Update-ScheduleStatus {
             elseif ($rule.autoDisabled) { $info.Add('已达到次数上限，规则自动关闭。重新启用并保存将从 0 次开始。') }
             elseif ($rule.enabled -and $rule.type -eq 'quotaReset') { $info.Add('等待接口确认额度刷新。首次读取不触发，同一额度周期最多执行一次。') }
             elseif ($rule.nextAt) { $info.Add('下次执行（北京时间）：' + [DateTimeOffset]::Parse($rule.nextAt).ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd HH:mm')) }
+            elseif ($rule.enabled -and $rule.type -eq 'dates') { $info.Add('所有指定时刻均已过去，没有下次执行；过去时刻不会补发。') }
             else { $info.Add('当前未启用自动执行。') }
             if ($rule.lastRun) {
                 $run = $rule.lastRun
@@ -154,6 +169,33 @@ function New-RuleTextBox {
     $box.FontSize = 14; $box.Padding = '8'; $box.Margin = '0,0,0,10'
     return $box
 }
+function New-RuleTimePicker {
+    $panel = New-Object System.Windows.Controls.WrapPanel
+    $hour = New-Object System.Windows.Controls.ComboBox
+    $minute = New-Object System.Windows.Controls.ComboBox
+    foreach ($n in 0..23) { $hour.Items.Add($n.ToString('00')) | Out-Null }
+    foreach ($n in 0..59) { $minute.Items.Add($n.ToString('00')) | Out-Null }
+    foreach ($control in @($hour, $minute)) { $control.FontSize = 14; $control.Width = 65; $control.Padding = '5'; $control.Margin = '0,0,6,8'; $control.SelectedIndex = 0 }
+    $panel.Children.Add($hour) | Out-Null
+    $panel.Children.Add((New-Text ':' 14 '#182848')) | Out-Null
+    $panel.Children.Add($minute) | Out-Null
+    return [PSCustomObject]@{Panel = $panel; Hour = $hour; Minute = $minute}
+}
+function New-RuleDateTimePicker {
+    $time = New-RuleTimePicker
+    $date = New-Object System.Windows.Controls.DatePicker
+    $date.Width = 150; $date.FontSize = 14; $date.Margin = '0,0,10,8'; $date.SelectedDateFormat = 'Short'
+    $time.Panel.Children.Insert(0, $date)
+    return [PSCustomObject]@{Panel = $time.Panel; Date = $date; Hour = $time.Hour; Minute = $time.Minute}
+}
+function Set-RuleDateTime($picker, [string]$value) {
+    $date = [DateTime]::ParseExact($value, "yyyy-MM-dd'T'HH:mm", [Globalization.CultureInfo]::InvariantCulture)
+    $picker.Date.SelectedDate = $date.Date; $picker.Hour.SelectedIndex = $date.Hour; $picker.Minute.SelectedIndex = $date.Minute
+}
+function Get-RuleDateTime($picker) {
+    if (-not $picker.Date.SelectedDate -or $picker.Hour.SelectedIndex -lt 0 -or $picker.Minute.SelectedIndex -lt 0) { throw '请选择有效日期和时间。' }
+    return $picker.Date.SelectedDate.ToString('yyyy-MM-dd') + 'T' + $picker.Hour.SelectedItem + ':' + $picker.Minute.SelectedItem
+}
 function Show-ScheduleWindow {
     if ($script:scheduleWindow) { $script:scheduleWindow.Show(); $script:scheduleWindow.Activate() | Out-Null; return }
     $script:scheduleRules = New-Object 'System.Collections.Generic.List[object]'
@@ -171,7 +213,7 @@ function Show-ScheduleWindow {
     $dock.Margin = '24'
     $heading = New-Text '自动执行规则' 26 '#182848'
     [System.Windows.Controls.DockPanel]::SetDock($heading, 'Top'); $dock.Children.Add($heading) | Out-Null
-    $intro = New-Text '支持每日定时与额度刷新。首次创建会话，后续固定编辑首条“你好”并重发。' 14 '#53627B'
+    $intro = New-Text '选择触发器和消息内容。首次创建并绑定会话，后续编辑首条消息重发。' 14 '#53627B'
     [System.Windows.Controls.DockPanel]::SetDock($intro, 'Top'); $dock.Children.Add($intro) | Out-Null
     $left = New-Object System.Windows.Controls.StackPanel
     $left.Width = 225; $left.Margin = '0,0,22,0'
@@ -190,7 +232,7 @@ function Show-ScheduleWindow {
         $script:scheduleFeedback.Text = '规则已删除，原会话保留。已开始的执行会完成。'
     })
     $left.Children.Add($remove) | Out-Null
-    $left.Children.Add((New-Text '每条规则固定复用一个会话。每日定时按北京时间执行；额度刷新以接口实际状态为准。' 12 '#53627B')) | Out-Null
+    $left.Children.Add((New-Text '每条规则固定复用一个会话。所有时间按北京时间；电脑需保持运行，错过的时刻不补发。额度刷新以接口实际状态为准。' 12 '#53627B')) | Out-Null
     $dock.Children.Add($left) | Out-Null
     $editorScroll = New-Object System.Windows.Controls.ScrollViewer
     $editorScroll.VerticalScrollBarVisibility = 'Auto'
@@ -198,10 +240,15 @@ function Show-ScheduleWindow {
     $editor.Margin = '0,0,12,0'
     $editor.Children.Add((New-Text '规则名称' 14 '#182848')) | Out-Null
     $script:ruleName = New-RuleTextBox; $editor.Children.Add($script:ruleName) | Out-Null
-    $editor.Children.Add((New-Text '规则类型' 14 '#182848')) | Out-Null
+    $editor.Children.Add((New-Text '触发器' 14 '#182848')) | Out-Null
     $script:ruleType = New-Object System.Windows.Controls.ComboBox
     $script:ruleType.Items.Add('每日定时') | Out-Null
     $script:ruleType.Items.Add('额度刷新') | Out-Null
+    $script:ruleType.Items.Add('指定日期时间（可添加多个）') | Out-Null
+    $script:ruleType.Items.Add('从指定日期开始按间隔重复') | Out-Null
+    $signalOption = New-Object System.Windows.Controls.ComboBoxItem
+    $signalOption.Content = '程序运行完毕信号（暂未开放）'; $signalOption.IsEnabled = $false
+    $script:ruleType.Items.Add($signalOption) | Out-Null
     $script:ruleType.FontSize = 14; $script:ruleType.Padding = '8'; $script:ruleType.Margin = '0,0,0,10'
     $script:ruleType.Add_SelectionChanged({ Update-RuleTypeFields })
     $editor.Children.Add($script:ruleType) | Out-Null
@@ -210,6 +257,14 @@ function Show-ScheduleWindow {
     $script:ruleTimes = New-RuleTextBox
     $script:ruleTimes.ToolTip = '例如 08:00, 13:00, 18:00。此示例不会自动保存或启用。'
     $script:dailyFields.Children.Add($script:ruleTimes) | Out-Null
+    $script:dailyPicker = New-RuleTimePicker
+    $addTime = New-Button '添加时间'
+    $addTime.Add_Click({
+        $value = $script:dailyPicker.Hour.SelectedItem + ':' + $script:dailyPicker.Minute.SelectedItem
+        $script:ruleTimes.Text = (@(@($script:ruleTimes.Text -split '[,，;；\s]+' | Where-Object { $_ }) + $value) | Sort-Object -Unique) -join ', '
+    })
+    $script:dailyPicker.Panel.Children.Add($addTime) | Out-Null
+    $script:dailyFields.Children.Add($script:dailyPicker.Panel) | Out-Null
     $editor.Children.Add($script:dailyFields) | Out-Null
     $script:quotaFields = New-Object System.Windows.Controls.StackPanel
     $script:quotaFields.Children.Add((New-Text '监控哪种额度刷新' 14 '#182848')) | Out-Null
@@ -219,13 +274,54 @@ function Show-ScheduleWindow {
     $script:quotaFields.Children.Add($script:quotaWindow) | Out-Null
     $script:quotaFields.Children.Add((New-Text '每分钟检测；确认周期重置或剩余额度增加且仍有可用额度后执行。每个额度周期最多一次。' 12 '#53627B')) | Out-Null
     $editor.Children.Add($script:quotaFields) | Out-Null
+    $script:datesFields = New-Object System.Windows.Controls.StackPanel
+    $script:datesFields.Children.Add((New-Text '选择执行日期和时间（北京时间）' 14 '#182848')) | Out-Null
+    $script:datePicker = New-RuleDateTimePicker
+    $script:datesFields.Children.Add($script:datePicker.Panel) | Out-Null
+    $dateActions = New-Object System.Windows.Controls.WrapPanel
+    $addDate = New-Button '添加日期时间'
+    $addDate.Add_Click({
+        try {
+            $value = (Get-RuleDateTime $script:datePicker).Replace('T', ' ')
+            if (-not $script:ruleDates.Items.Contains($value)) { $script:ruleDates.Items.Add($value) | Out-Null }
+            $script:scheduleFeedback.Text = ''
+        } catch { $script:scheduleFeedback.Text = $_.Exception.Message }
+    })
+    $removeDate = New-Button '移除所选时间'
+    $removeDate.Add_Click({ if ($null -ne $script:ruleDates.SelectedItem) { $script:ruleDates.Items.Remove($script:ruleDates.SelectedItem) } })
+    $dateActions.Children.Add($addDate) | Out-Null; $dateActions.Children.Add($removeDate) | Out-Null
+    $script:datesFields.Children.Add($dateActions) | Out-Null
+    $script:ruleDates = New-Object System.Windows.Controls.ListBox
+    $script:ruleDates.Height = 105; $script:ruleDates.FontSize = 14; $script:ruleDates.Margin = '0,0,0,10'
+    $script:datesFields.Children.Add($script:ruleDates) | Out-Null
+    $editor.Children.Add($script:datesFields) | Out-Null
+    $script:intervalFields = New-Object System.Windows.Controls.StackPanel
+    $script:intervalFields.Children.Add((New-Text '首次执行日期和时间（北京时间）' 14 '#182848')) | Out-Null
+    $script:intervalPicker = New-RuleDateTimePicker
+    $script:intervalFields.Children.Add($script:intervalPicker.Panel) | Out-Null
+    $script:intervalFields.Children.Add((New-Text '此后每隔（按开始时间计算，不随任务耗时推迟）' 13 '#53627B')) | Out-Null
+    $intervalRow = New-Object System.Windows.Controls.WrapPanel
+    $script:intervalValue = New-RuleTextBox; $script:intervalValue.Width = 100
+    $script:intervalUnit = New-Object System.Windows.Controls.ComboBox
+    foreach ($unit in @('分钟', '小时', '天')) { $script:intervalUnit.Items.Add($unit) | Out-Null }
+    $script:intervalUnit.FontSize = 14; $script:intervalUnit.Padding = '8'; $script:intervalUnit.Margin = '10,0,0,10'
+    $intervalRow.Children.Add($script:intervalValue) | Out-Null; $intervalRow.Children.Add($script:intervalUnit) | Out-Null
+    $script:intervalFields.Children.Add($intervalRow) | Out-Null
+    $editor.Children.Add($script:intervalFields) | Out-Null
+    $editor.Children.Add((New-Text '触发时发送的消息（支持多行，最多 20000 字）' 14 '#182848')) | Out-Null
+    $script:ruleMessage = New-RuleTextBox
+    $script:ruleMessage.AcceptsReturn = $true; $script:ruleMessage.TextWrapping = 'Wrap'; $script:ruleMessage.Height = 110
+    $script:ruleMessage.VerticalScrollBarVisibility = 'Auto'
+    $editor.Children.Add($script:ruleMessage) | Out-Null
+    $editor.Children.Add((New-Text '新建会话沿用只读权限；自定义消息不会自动授予文件修改或命令审批权限。' 12 '#53627B')) | Out-Null
     $editor.Children.Add((New-Text '会话链接或 ID（首次留空，触发后自动回填并保存）' 14 '#182848')) | Out-Null
     $script:ruleThread = New-RuleTextBox; $editor.Children.Add($script:ruleThread) | Out-Null
-    $editor.Children.Add((New-Text '编辑首条会移除当前路径后续历史；执行前会保存本地历史备份。请绑定专用计时会话。' 12 '#8A5A20')) | Out-Null
+    $editor.Children.Add((New-Text '每次用上面的内容编辑首条并重发，会移除当前路径后续历史；执行前会保存本地历史备份。请绑定专用会话。' 12 '#8A5A20')) | Out-Null
     $editor.Children.Add((New-Text '运行方式' 14 '#182848')) | Out-Null
     $script:runMode = New-Object System.Windows.Controls.ComboBox
     $script:runMode.Items.Add('始终开启') | Out-Null
     $script:runMode.Items.Add('触发 X 次后关闭') | Out-Null
+    $script:runMode.Items.Add('仅执行一次') | Out-Null
     $script:runMode.FontSize = 14; $script:runMode.Padding = '8'; $script:runMode.Margin = '0,0,0,10'
     $script:runMode.Add_SelectionChanged({ Update-RunLimitFields })
     $editor.Children.Add($script:runMode) | Out-Null
@@ -237,8 +333,8 @@ function Show-ScheduleWindow {
     $script:triggerProgress = New-Text '已触发 0 次' 15 '#182848'
     $script:triggerProgress.FontWeight = 'SemiBold'
     $script:triggerProgress.Margin = '0,0,0,10'
-    $script:runLimitBox.Children.Add($script:triggerProgress) | Out-Null
     $editor.Children.Add($script:runLimitBox) | Out-Null
+    $editor.Children.Add($script:triggerProgress) | Out-Null
     $script:ruleEnabled = New-Object System.Windows.Controls.CheckBox
     $script:ruleEnabled.Content = '启用这条规则'; $script:ruleEnabled.FontSize = 15; $script:ruleEnabled.Margin = '0,0,0,10'
     $editor.Children.Add($script:ruleEnabled) | Out-Null
@@ -248,12 +344,27 @@ function Show-ScheduleWindow {
         try {
             $name = $script:ruleName.Text.Trim()
             if (-not $name -or $name.Length -gt 80) { throw '请填写 1–80 字的规则名称。' }
-            $ruleType = if ($script:ruleType.SelectedIndex -eq 1) { 'quotaReset' } else { 'daily' }
+            $ruleType = switch ($script:ruleType.SelectedIndex) { 0 { 'daily' }; 1 { 'quotaReset' }; 2 { 'dates' }; 3 { 'interval' }; default { throw '该触发器暂未开放。' } }
+            $message = $script:ruleMessage.Text
+            if (-not $message.Trim() -or $message.Length -gt 20000) { throw '消息内容需要 1–20000 字，不能全为空白。' }
             $quotaWindow = switch ($script:quotaWindow.SelectedIndex) { 0 { 'fiveHour' }; 1 { 'weekly' }; default { 'any' } }
             $times = @()
             if ($ruleType -eq 'daily') {
                 $times = @($script:ruleTimes.Text -split '[,，;；\s]+' | Where-Object { $_ } | Sort-Object -Unique)
                 if ($times.Count -lt 1 -or $times.Count -gt 24 -or @($times | Where-Object { $_ -notmatch '^(?:[01]\d|2[0-3]):[0-5]\d$' }).Count -gt 0) { throw '请填写有效时间，例如 08:00, 13:00；每条规则最多 24 个时间。' }
+            }
+            $dates = @(); $startAt = $null; $intervalMinutes = $null
+            if ($ruleType -eq 'dates') {
+                $dates = @($script:ruleDates.Items | ForEach-Object { ([string]$_).Replace(' ', 'T') } | Sort-Object -Unique)
+                if ($dates.Count -lt 1 -or $dates.Count -gt 100) { throw '请添加 1–100 个执行日期时间。' }
+            }
+            if ($ruleType -eq 'interval') {
+                $startAt = Get-RuleDateTime $script:intervalPicker
+                $parsedInterval = 0
+                if (-not [int]::TryParse($script:intervalValue.Text.Trim(), [ref]$parsedInterval) -or $parsedInterval -lt 1 -or $parsedInterval -gt 525600) { throw '间隔必须为正整数，最长 365 天。' }
+                $multiplier = switch ($script:intervalUnit.SelectedIndex) { 0 { 1 }; 1 { 60 }; 2 { 1440 }; default { throw '请选择间隔单位。' } }
+                $intervalMinutes = $parsedInterval * $multiplier
+                if ($intervalMinutes -gt 525600) { throw '间隔最长 365 天。' }
             }
             $threadId = $script:ruleThread.Text.Trim()
             if ($threadId -match '^codex://threads/([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})/?$') { $threadId = $Matches[1] }
@@ -266,11 +377,12 @@ function Show-ScheduleWindow {
                 if (-not [int]::TryParse($script:runLimit.Text.Trim(), [ref]$parsedLimit) -or $parsedLimit -lt 1 -or $parsedLimit -gt 100000) { throw '触发次数请输入 1–100000 的整数。' }
                 $limitValue = $parsedLimit
             }
+            if ($script:runMode.SelectedIndex -eq 2) { $limitValue = 1 }
             $oldRule = @($script:scheduleRules | Where-Object { $_.id -eq $id }) | Select-Object -First 1
             $reenabling = $script:ruleEnabled.IsChecked -and $oldRule -and -not $oldRule.enabled
             $activationId = if ($oldRule.activationId) { $oldRule.activationId } else { 'legacy' }
             if (-not $oldRule -or $reenabling -or $oldRule.runLimit -ne $limitValue) { $activationId = [Guid]::NewGuid().ToString() }
-            $replacement = [PSCustomObject]@{id = $id; name = $name; enabled = [bool]$script:ruleEnabled.IsChecked; type = $ruleType; quotaWindow = $quotaWindow; runLimit = $limitValue; activationId = $activationId; times = $times; existingThreadId = $threadId}
+            $replacement = [PSCustomObject]@{id = $id; name = $name; enabled = [bool]$script:ruleEnabled.IsChecked; type = $ruleType; message = $message; quotaWindow = $quotaWindow; runLimit = $limitValue; activationId = $activationId; times = $times; dates = $dates; startAt = $startAt; intervalMinutes = $intervalMinutes; existingThreadId = $threadId}
             $found = $false
             for ($i = 0; $i -lt $script:scheduleRules.Count; $i++) {
                 if ($script:scheduleRules[$i].id -eq $id) { $script:scheduleRules[$i] = $replacement; $found = $true; break }

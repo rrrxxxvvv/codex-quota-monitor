@@ -1,0 +1,35 @@
+const assert=require('node:assert/strict');
+const {validateConfig,dueJobs,nextTime,dateTimeMs,matchesQuota}=require('../schedule-core.cjs');
+const base={id:'test',name:'测试',enabled:true,times:['08:00']};
+const config=r=>validateConfig({version:1,timeZone:'Asia/Shanghai',rules:[{...base,...r}]});
+const rule=r=>config(r).rules[0];
+const state={runs:{},blocked:{}};
+const ms=value=>Date.parse(value+':00+08:00');
+assert.equal(rule({}).message,'你好');
+for(const bad of ['', ' \n', 'x'.repeat(20001),123])assert.throws(()=>rule({message:bad}));
+assert.equal(rule({message:'  内容\n第二行  '}).message,'  内容\n第二行  ');
+assert.throws(()=>rule({type:'programSignal'}));
+const dated=rule({type:'dates',dates:['2028-02-29T23:59','2028-03-01T00:00','2028-02-29T23:59']});
+assert.equal(dated.dates.length,2);
+assert.equal(dueJobs({rules:[dated]},state,ms('2028-02-29T23:59')+59000).length,1);
+assert.equal(dueJobs({rules:[dated]},state,ms('2028-03-01T00:01')).length,0,'no missed replay');
+assert.equal(nextTime(dated,ms('2028-02-29T23:59')),'2028-02-29T16:00:00.000Z');
+assert.equal(nextTime(dated,ms('2028-03-01T00:00')),null);
+for(const bad of ['2027-02-29T00:00','2028-04-31T08:00','2028-02-01T24:00','2028-1-1T08:00','2028-01-01T08:00Z']){
+  assert.ok(Number.isNaN(dateTimeMs(bad)));assert.throws(()=>rule({type:'dates',dates:[bad]}));
+}
+assert.throws(()=>rule({type:'dates',dates:[]}));
+const interval=rule({type:'interval',startAt:'2026-12-31T23:30',intervalMinutes:90});
+assert.equal(nextTime(interval,ms('2026-12-31T23:29')),'2026-12-31T15:30:00.000Z');
+assert.equal(nextTime(interval,ms('2026-12-31T23:30')),'2026-12-31T17:00:00.000Z');
+assert.equal(dueJobs({rules:[interval]},state,ms('2027-01-01T01:00')).length,1);
+assert.equal(dueJobs({rules:[interval]},state,ms('2027-01-01T01:01')).length,0);
+assert.equal(dueJobs({rules:[interval]},state,ms('2026-12-31T22:00')).length,0,'not before start');
+const job=dueJobs({rules:[interval]},state,ms('2027-01-01T01:00'))[0];
+assert.equal(dueJobs({rules:[interval]},{runs:{[job.key]:{}},blocked:{}},ms('2027-01-01T01:00')+30000).length,0,'persisted dedup');
+assert.equal(dueJobs({rules:[interval]},{runs:{},blocked:{test:{}}},ms('2027-01-01T01:00')).length,0);
+assert.equal(dueJobs({rules:[{...interval,enabled:false}]},state,ms('2027-01-01T01:00')).length,0);
+for(const intervalMinutes of [0,-1,1.5,525601,'60'])assert.throws(()=>rule({type:'interval',startAt:interval.startAt,intervalMinutes}));
+assert.equal(nextTime(rule({type:'quotaReset'})),null);
+assert.ok(matchesQuota(rule({type:'quotaReset',message:'额度刷新任务'}),{windowDurationMins:300}));
+console.log('PASS: legacy default, custom message validation, dates, leap days, Beijing midnight/year rollover, intervals, no catch-up, dedup, disabled/blocked and quota triggers.');
