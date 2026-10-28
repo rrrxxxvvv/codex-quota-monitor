@@ -196,6 +196,16 @@ function Get-RuleDateTime($picker) {
     if (-not $picker.Date.SelectedDate -or $picker.Hour.SelectedIndex -lt 0 -or $picker.Minute.SelectedIndex -lt 0) { throw '请选择有效日期和时间。' }
     return $picker.Date.SelectedDate.ToString('yyyy-MM-dd') + 'T' + $picker.Hour.SelectedItem + ':' + $picker.Minute.SelectedItem
 }
+function New-RuleSection($parent, $title) {
+    $border = New-Object System.Windows.Controls.Border
+    $border.Background = 'White'; $border.BorderBrush = '#E2E8F0'; $border.BorderThickness = '1'
+    $border.CornerRadius = '10'; $border.Padding = '18'; $border.Margin = '0,0,0,14'
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $heading = New-Text $title 16 '#182848'; $heading.FontWeight = 'SemiBold'
+    $panel.Children.Add($heading) | Out-Null
+    $border.Child = $panel; $parent.Children.Add($border) | Out-Null
+    return $panel
+}
 function Show-ScheduleWindow {
     if ($script:scheduleWindow) { $script:scheduleWindow.Show(); $script:scheduleWindow.Activate() | Out-Null; return }
     $script:scheduleRules = New-Object 'System.Collections.Generic.List[object]'
@@ -206,38 +216,87 @@ function Show-ScheduleWindow {
             foreach ($rule in $config.rules) { $script:scheduleRules.Add($rule) }
         }
     } catch { [System.Windows.MessageBox]::Show('规则文件无法读取，已保留原文件，请先排查。', '定时规则') | Out-Null; return }
-    $window = New-Window '自动执行规则' 960 860
+    $window = New-Window '自动执行规则' 1040 860
     $window.MinWidth = 820; $window.MinHeight = 620
+    $window.Resources = [Windows.Markup.XamlReader]::Parse(@'
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style TargetType="Button">
+    <Setter Property="Background" Value="White"/><Setter Property="Foreground" Value="#334155"/>
+    <Setter Property="BorderBrush" Value="#CBD5E1"/><Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+      <Border x:Name="surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="surface" Property="Opacity" Value="0.8"/></Trigger>
+        <Trigger Property="IsPressed" Value="True"><Setter TargetName="surface" Property="Opacity" Value="0.6"/></Trigger>
+        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="surface" Property="Opacity" Value="0.45"/></Trigger>
+        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="surface" Property="BorderBrush" Value="#2563EB"/><Setter TargetName="surface" Property="BorderThickness" Value="2"/></Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style TargetType="TextBox">
+    <Setter Property="BorderBrush" Value="#CBD5E1"/><Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Style.Triggers><Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="#2563EB"/></Trigger></Style.Triggers>
+  </Style>
+  <Style TargetType="ListBoxItem">
+    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+      <Border x:Name="surface" Background="Transparent" CornerRadius="6" Padding="{TemplateBinding Padding}"><ContentPresenter/></Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="surface" Property="Background" Value="#F1F5F9"/></Trigger>
+        <Trigger Property="IsSelected" Value="True"><Setter TargetName="surface" Property="Background" Value="#E8F0FF"/><Setter Property="Foreground" Value="#1D4ED8"/></Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+</ResourceDictionary>
+'@)
     $script:scheduleWindow = $window
     $dock = New-Object System.Windows.Controls.DockPanel
     $dock.Margin = '24'
     $heading = New-Text '自动执行规则' 26 '#182848'
     [System.Windows.Controls.DockPanel]::SetDock($heading, 'Top'); $dock.Children.Add($heading) | Out-Null
-    $intro = New-Text '选择触发器和消息内容。首次创建并绑定会话，后续编辑首条消息重发。' 14 '#53627B'
+    $intro = New-Text '设置何时触发、发送什么，以及执行次数。所有时间均为北京时间。' 13 '#64748B'
     [System.Windows.Controls.DockPanel]::SetDock($intro, 'Top'); $dock.Children.Add($intro) | Out-Null
-    $left = New-Object System.Windows.Controls.StackPanel
-    $left.Width = 225; $left.Margin = '0,0,22,0'
+    $left = New-Object System.Windows.Controls.DockPanel
+    $left.Width = 210; $left.Margin = '0,0,20,0'
     [System.Windows.Controls.DockPanel]::SetDock($left, 'Left')
     $script:ruleList = New-Object System.Windows.Controls.ListBox
-    $script:ruleList.Height = 390; $script:ruleList.FontSize = 13
+    $script:ruleList.FontSize = 13; $script:ruleList.Padding = '6'; $script:ruleList.BorderThickness = '0'; $script:ruleList.Background = 'Transparent'
+    [System.Windows.Controls.ScrollViewer]::SetHorizontalScrollBarVisibility($script:ruleList, 'Disabled')
     $script:ruleList.Add_SelectionChanged({ if ($script:ruleList.SelectedItem) { Select-Rule $script:ruleList.SelectedItem.Tag } })
-    $left.Children.Add($script:ruleList) | Out-Null
+    $leftActions = New-Object System.Windows.Controls.StackPanel
+    [System.Windows.Controls.DockPanel]::SetDock($leftActions, 'Top'); $left.Children.Add($leftActions) | Out-Null
+    $leftActions.Children.Add((New-Text '我的规则' 15 '#334155')) | Out-Null
     $add = New-Button '+ 添加规则'
     $add.Add_Click({ $script:ruleList.SelectedIndex = -1; Select-Rule ([Guid]::NewGuid().ToString()) })
-    $left.Children.Add($add) | Out-Null
+    $add.Margin = '0,0,0,8'; $add.Background = '#EFF6FF'; $add.Foreground = '#1D4ED8'; $add.BorderBrush = '#BFDBFE'
+    $leftActions.Children.Add($add) | Out-Null
     $remove = New-Button '删除所选规则'
     $remove.Add_Click({
         for ($i = $script:scheduleRules.Count - 1; $i -ge 0; $i--) { if ($script:scheduleRules[$i].id -eq $script:editingRuleId) { $script:scheduleRules.RemoveAt($i) } }
         Save-ScheduleConfig; Refresh-RuleList; Select-Rule ([Guid]::NewGuid().ToString())
         $script:scheduleFeedback.Text = '规则已删除，原会话保留。已开始的执行会完成。'
     })
-    $left.Children.Add($remove) | Out-Null
-    $left.Children.Add((New-Text '每条规则固定复用一个会话。所有时间按北京时间；电脑需保持运行，错过的时刻不补发。额度刷新以接口实际状态为准。' 12 '#53627B')) | Out-Null
+    $leftBottom = New-Object System.Windows.Controls.StackPanel
+    [System.Windows.Controls.DockPanel]::SetDock($leftBottom, 'Bottom'); $left.Children.Add($leftBottom) | Out-Null
+    $remove.Foreground = '#9F4545'; $remove.Margin = '0,12,0,12'; $leftBottom.Children.Add($remove) | Out-Null
+    $leftBottom.Children.Add((New-Text '请保持电脑和监控运行。错过的时刻不补发，忙碌跳过不占次数。' 12 '#64748B')) | Out-Null
+    $left.Children.Add($script:ruleList) | Out-Null
     $dock.Children.Add($left) | Out-Null
+    $editorHost = New-Object System.Windows.Controls.DockPanel
+    $footer = New-Object System.Windows.Controls.Border
+    $footer.Background = 'White'; $footer.BorderBrush = '#E2E8F0'; $footer.BorderThickness = '1'; $footer.CornerRadius = '10'; $footer.Padding = '16,12'; $footer.Margin = '0,10,0,0'
+    [System.Windows.Controls.DockPanel]::SetDock($footer, 'Bottom'); $editorHost.Children.Add($footer) | Out-Null
+    $footerContent = New-Object System.Windows.Controls.StackPanel; $footer.Child = $footerContent
+    $footerRow = New-Object System.Windows.Controls.DockPanel; $footerContent.Children.Add($footerRow) | Out-Null
     $editorScroll = New-Object System.Windows.Controls.ScrollViewer
     $editorScroll.VerticalScrollBarVisibility = 'Auto'
-    $editor = New-Object System.Windows.Controls.StackPanel
-    $editor.Margin = '0,0,12,0'
+    $editorRoot = New-Object System.Windows.Controls.StackPanel
+    $editorRoot.Margin = '0,0,10,0'
+    $editor = New-RuleSection $editorRoot '触发条件'
     $editor.Children.Add((New-Text '规则名称' 14 '#182848')) | Out-Null
     $script:ruleName = New-RuleTextBox; $editor.Children.Add($script:ruleName) | Out-Null
     $editor.Children.Add((New-Text '触发器' 14 '#182848')) | Out-Null
@@ -308,16 +367,17 @@ function Show-ScheduleWindow {
     $intervalRow.Children.Add($script:intervalValue) | Out-Null; $intervalRow.Children.Add($script:intervalUnit) | Out-Null
     $script:intervalFields.Children.Add($intervalRow) | Out-Null
     $editor.Children.Add($script:intervalFields) | Out-Null
-    $editor.Children.Add((New-Text '触发时发送的消息（支持多行，最多 20000 字）' 14 '#182848')) | Out-Null
+    $editor = New-RuleSection $editorRoot '消息与会话'
+    $editor.Children.Add((New-Text '消息内容 · 支持多行，最多 20000 字' 13 '#64748B')) | Out-Null
     $script:ruleMessage = New-RuleTextBox
-    $script:ruleMessage.AcceptsReturn = $true; $script:ruleMessage.TextWrapping = 'Wrap'; $script:ruleMessage.Height = 110
+    $script:ruleMessage.AcceptsReturn = $true; $script:ruleMessage.TextWrapping = 'Wrap'; $script:ruleMessage.Height = 130; $script:ruleMessage.VerticalContentAlignment = 'Top'
     $script:ruleMessage.VerticalScrollBarVisibility = 'Auto'
     $editor.Children.Add($script:ruleMessage) | Out-Null
     $editor.Children.Add((New-Text '新建会话沿用只读权限；自定义消息不会自动授予文件修改或命令审批权限。' 12 '#53627B')) | Out-Null
     $editor.Children.Add((New-Text '会话链接或 ID（首次留空，触发后自动回填并保存）' 14 '#182848')) | Out-Null
     $script:ruleThread = New-RuleTextBox; $editor.Children.Add($script:ruleThread) | Out-Null
     $editor.Children.Add((New-Text '每次用上面的内容编辑首条并重发，会移除当前路径后续历史；执行前会保存本地历史备份。请绑定专用会话。' 12 '#8A5A20')) | Out-Null
-    $editor.Children.Add((New-Text '运行方式' 14 '#182848')) | Out-Null
+    $editor = New-RuleSection $editorRoot '运行方式'
     $script:runMode = New-Object System.Windows.Controls.ComboBox
     $script:runMode.Items.Add('始终开启') | Out-Null
     $script:runMode.Items.Add('触发 X 次后关闭') | Out-Null
@@ -336,10 +396,11 @@ function Show-ScheduleWindow {
     $editor.Children.Add($script:runLimitBox) | Out-Null
     $editor.Children.Add($script:triggerProgress) | Out-Null
     $script:ruleEnabled = New-Object System.Windows.Controls.CheckBox
-    $script:ruleEnabled.Content = '启用这条规则'; $script:ruleEnabled.FontSize = 15; $script:ruleEnabled.Margin = '0,0,0,10'
-    $editor.Children.Add($script:ruleEnabled) | Out-Null
-    $actions = New-Object System.Windows.Controls.WrapPanel
+    $script:ruleEnabled.Content = '启用这条规则'; $script:ruleEnabled.FontSize = 14; $script:ruleEnabled.VerticalAlignment = 'Center'
     $save = New-Button '保存规则'
+    $save.Background = '#2563EB'; $save.Foreground = 'White'; $save.BorderBrush = '#2563EB'; $save.Margin = '12,0,0,0'; $save.MinWidth = 120
+    [System.Windows.Controls.DockPanel]::SetDock($save, 'Right'); $footerRow.Children.Add($save) | Out-Null
+    $footerRow.Children.Add($script:ruleEnabled) | Out-Null
     $save.Add_Click({
         try {
             $name = $script:ruleName.Text.Trim()
@@ -394,14 +455,15 @@ function Show-ScheduleWindow {
             $script:scheduleFeedback.Text = '已保存。启用后，从下一次符合触发条件时开始执行。'
         } catch { $script:scheduleFeedback.Text = $_.Exception.Message }
     })
-    $actions.Children.Add($save) | Out-Null
-    $editor.Children.Add($actions) | Out-Null
     $script:scheduleFeedback = New-Text '' 13 '#356649'
-    $script:scheduleFeedback.Margin = '0,12,0,10'; $editor.Children.Add($script:scheduleFeedback) | Out-Null
+    $script:scheduleFeedback.Margin = '0,8,0,0'; $footerContent.Children.Add($script:scheduleFeedback) | Out-Null
+    $editor = New-RuleSection $editorRoot '执行状态'
     $script:ruleStatus = New-Text '' 13 '#182848'; $editor.Children.Add($script:ruleStatus) | Out-Null
-    $editor.Children.Add((New-Text '最近执行记录' 16 '#182848')) | Out-Null
-    $script:ruleLog = New-Text '' 12 '#53627B'; $editor.Children.Add($script:ruleLog) | Out-Null
-    $editorScroll.Content = $editor; $dock.Children.Add($editorScroll) | Out-Null
+    $logExpander = New-Object System.Windows.Controls.Expander
+    $logExpander.Header = '最近执行记录'; $logExpander.FontSize = 13
+    $script:ruleLog = New-Text '' 12 '#53627B'; $script:ruleLog.Margin = '0,10,0,0'; $logExpander.Content = $script:ruleLog
+    $editor.Children.Add($logExpander) | Out-Null
+    $editorScroll.Content = $editorRoot; $editorHost.Children.Add($editorScroll) | Out-Null; $dock.Children.Add($editorHost) | Out-Null
     $window.Content = $dock
     $script:scheduleTimer = New-Object Windows.Threading.DispatcherTimer
     $script:scheduleTimer.Interval = [TimeSpan]::FromSeconds(2)

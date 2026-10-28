@@ -1,4 +1,4 @@
-# Codex Quota Monitor v1.5.0
+# Codex Quota Monitor v1.5.1
 
 Windows 桌面额度监控：读取本机已登录 Codex 的额度，额度重置或增加后显示持续置顶提醒；可按时间或额度刷新规则发送自定义消息，并可将额度上传到 AstrBot，通过 QQ 查询和接收通知。
 
