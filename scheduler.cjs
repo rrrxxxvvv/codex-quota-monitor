@@ -77,7 +77,7 @@ class Scheduler {
       active.checking=true;
       const {client,run}=active;
       try{
-        const page=await client.request('thread/turns/list',{threadId:run.threadId,sortDirection:'asc',limit:3,itemsView:'full'});
+        const page=await this.submittedTurns(client,run);
         if(this.stopped)return;
         const turn=page.data.find(t=>t.id===run.turnId);
         if(!turn)throw new Error('无法找到已发送的任务，请检查会话；不会自动重发。');
@@ -96,6 +96,23 @@ class Scheduler {
     }
   }
   phase(run,phase){run.phase=phase;this.save();this.publish();}
+  async submittedTurns(client,run,allowPending=false){
+    let page;
+    try{page=await client.request('thread/turns/list',{threadId:run.threadId,sortDirection:'asc',limit:3,itemsView:'full'});}
+    catch(e){
+      // A newly accepted turn can precede creation of its paginated history.
+      if(allowPending && e.rpcCode===-32601 && /paginated_threads is not supported yet/.test(e.message))return {data:[],nextCursor:null};
+      throw e;
+    }
+    const turn=page.data.find(t=>t.id===run.turnId);
+    if(turn?.status==='interrupted'){
+      // The persisted snapshot can briefly lag behind the owning live runtime.
+      // Keep the connection alive while that runtime is still executing.
+      const metadata=await client.request('thread/read',{threadId:run.threadId,includeTurns:false});
+      if(metadata.thread.status.type==='active')return {...page,data:page.data.map(t=>t.id===run.turnId?{...t,status:'inProgress'}:t)};
+    }
+    return page;
+  }
   async allTurns(client,threadId){
     let cursor=null,turns=[];
     do{
@@ -195,13 +212,13 @@ class Scheduler {
       let completed=null;
       const deadline=Date.now()+this.confirmationTimeoutMs;
       while(!this.stopped && Date.now()<deadline){
-        const page=await client.request('thread/turns/list',{threadId:binding.threadId,sortDirection:'asc',limit:3,itemsView:'full'});
+        const page=await this.submittedTurns(client,run,true);
         const turn=page.data.find(t=>t.id===run.turnId);
         if(turn && turn.status!=='inProgress'){completed=turn;break;}
         await new Promise(resolve=>setTimeout(resolve,1000));
       }
       if(completed && completed.status!=='completed')throw new Error(`消息已提交但状态为 ${completed.status}：${completed.error?.message || '请检查会话'}`);
-      const final=await client.request('thread/turns/list',{threadId:binding.threadId,sortDirection:'asc',limit:3,itemsView:'full'});
+      const final=await this.submittedTurns(client,run);
       const users=final.data.flatMap(t=>t.items).filter(i=>i.type==='userMessage');
       if(final.data.length!==1 || final.nextCursor || final.data[0].id!==run.turnId || users.length!==1 || users[0].content.filter(x=>x.type==='text').map(x=>x.text).join('')!==message)throw new Error('发送后会话历史与预期不符，请核对；已暂停该规则。');
       const currentTurn=final.data[0];
@@ -218,7 +235,7 @@ class Scheduler {
       run.error={message:e.message,rpcMethod:e.rpcMethod ?? null,rpcCode:e.rpcCode ?? null};
       if(!mutationAttempted && run.phase==='resuming-thread' && e.rpcMethod==='thread/resume' && /already has an active writer\b/i.test(e.message)){
         run.status='skipped';run.reason='active-writer';
-        run.message='会话被另一个 Codex 客户端占用（即使任务已结束也可能仍占用）。本次跳过，未修改历史、未发送消息，不计次数；规则保持启用。请在占用它的客户端结束使用并释放会话，之后等待下一次触发；仅重新勾选启用不能解除占用。';
+        run.message='此会话的写入连接仍被另一个 Codex 客户端持有。本次跳过，未修改历史、未发送消息，不计次数；规则保持启用。桌面端可继续使用其他会话；已打开过此会话时，仅切走或重新勾选规则不会立即释放占用，请等待占用客户端释放后再等下次触发。';
         this.log(rule.id,run.message,'warning');return run;
       }
       run.status=mutationAttempted?'uncertain':'failed';run.message=e.message;

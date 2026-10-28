@@ -35,10 +35,13 @@ class FakeClient {
   if(method==='thread/name/set')return {};
   if(method==='thread/read'||method==='thread/resume'){
    if(s.created && !s.sent)throw new Error('invalid paginated history lineage: missing source rollout');
-   return {thread:{id,historyMode:'paginated',status:{type:s.active?'active':'idle'}}};
+   const active=s.active||s.snapshotRuntimeActive;s.snapshotRuntimeActive=false;
+   return {thread:{id,historyMode:'paginated',status:{type:active?'active':'idle'}}};
   }
   if(method==='thread/turns/list'){
    if(s.created && !s.sent)throw new Error('invalid paginated history lineage: missing source rollout');
+   if(s.sent && s.pendingHistory){s.pendingHistory--;throw Object.assign(new Error('paginated_threads is not supported yet'),{rpcCode:-32601,rpcMethod:method});}
+   if(s.sent && s.interruptedSnapshot){s.interruptedSnapshot--;s.snapshotRuntimeActive=!s.reallyInterrupted;return {data:s.turns.map(t=>({...t,status:'interrupted'})),nextCursor:null};}
    return {data:s.turns,nextCursor:null};
   }
   if(method==='thread/revert'){assert.equal(p.beforeTurnId,s.turns[0].id);s.reverts++;s.turns=[];return {thread:{id}};}
@@ -53,6 +56,14 @@ function setup(name,server,existing=''){
 }
 function server(){return {calls:[],turns:[],sent:0,created:0,reverts:0};}
 (async()=>{
+ const transient=server();transient.pendingHistory=1;transient.interruptedSnapshot=1;
+ const startup=setup('history-startup',transient);
+ assert.equal((await startup.scheduler.execute(startup.r,'startup')).status,'success');
+ assert.equal(transient.sent,1,'history startup retries never resend');assert.equal(startup.scheduler.count(startup.r),1);startup.scheduler.stop();
+ const cancelled=server();cancelled.interruptedSnapshot=1;cancelled.reallyInterrupted=true;
+ const cancellation=setup('real-interruption',cancelled);
+ assert.equal((await cancellation.scheduler.execute(cancellation.r,'cancelled')).status,'uncertain');
+ assert.ok(cancellation.scheduler.state.blocked[cancellation.r.id]);assert.equal(cancelled.sent,1);cancellation.scheduler.stop();
  const s=server();const {scheduler:q,r,dir}=setup('normal',s);
  assert.equal((await q.execute(r,'first')).status,'success');assert.equal(s.created,1);assert.equal(s.sent,1);
  const bound=q.state.bindings.morning.threadId;

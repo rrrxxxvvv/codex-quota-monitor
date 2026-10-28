@@ -380,6 +380,7 @@ function Show-ScheduleWindow {
     $editor.Children.Add((New-Text '会话链接或 ID（首次留空，触发后自动回填并保存）' 14 '#182848')) | Out-Null
     $script:ruleThread = New-RuleTextBox; $editor.Children.Add($script:ruleThread) | Out-Null
     $editor.Children.Add((New-Text '每次用上面的内容编辑首条并重发，会移除当前路径后续历史；执行前会保存本地历史备份。请绑定专用会话。' 12 '#8A5A20')) | Out-Null
+    $editor.Children.Add((New-Text 'Codex 桌面端可同时使用其他会话。专用会话建议留给监控使用；在桌面端打开过后，仅切走不一定立即释放占用，占用期间触发会跳过。' 12 '#53627B')) | Out-Null
     $editor = New-RuleSection $editorRoot '运行方式'
     $script:runMode = New-Object System.Windows.Controls.ComboBox
     $script:runMode.Items.Add('始终开启') | Out-Null
