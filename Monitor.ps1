@@ -25,6 +25,13 @@ function Write-UiError($errorValue) {
     } catch { }
 }
 
+function Find-NodeExecutable($directory) {
+    $bundled = Join-Path $directory 'runtime\node.exe'
+    if ([IO.File]::Exists($bundled)) { return $bundled }
+    $command = Get-Command node.exe -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    throw '未找到 Node.js。请下载内置运行时的 Windows 便携包，或安装 Node.js 22 及以上版本。'
+}
 function New-Text($text, $size, $color) {
     $t = New-Object System.Windows.Controls.TextBlock
     $t.Text = $text; $t.FontSize = $size; $t.Foreground = $color
@@ -135,10 +142,8 @@ try {
     $tray.ContextMenuStrip = $menu
     $tray.Add_DoubleClick({ $main.Show(); $main.Activate() | Out-Null })
 
-    $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
-    if (-not $nodeCommand) { throw '未找到 Node.js。请先安装 Node.js，或将 node.exe 加入 PATH。' }
     $start = New-Object Diagnostics.ProcessStartInfo
-    $start.FileName = $nodeCommand.Source
+    $start.FileName = Find-NodeExecutable $PSScriptRoot
     $start.Arguments = '"' + (Join-Path $PSScriptRoot 'monitor.cjs') + '"'
     $start.WorkingDirectory = $PSScriptRoot
     $start.UseShellExecute = $false; $start.CreateNoWindow = $true

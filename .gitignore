@@ -1,4 +1,7 @@
 /data/
+/runtime/
+/dist/
+/.build-cache/
 node_modules/
 *.log
 *.zip

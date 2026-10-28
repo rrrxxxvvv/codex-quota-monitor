@@ -1,4 +1,4 @@
-# Codex Quota Monitor v1.5.1
+# Codex Quota Monitor v1.5.2
 
 Windows 桌面额度监控：读取本机已登录 Codex 的额度，额度重置或增加后显示持续置顶提醒；可按时间或额度刷新规则发送自定义消息，并可将额度上传到 AstrBot，通过 QQ 查询和接收通知。
 
@@ -16,11 +16,15 @@ Windows 桌面额度监控：读取本机已登录 Codex 的额度，额度重�
 ## 环境依赖
 
 - Windows，Windows PowerShell 5.1、.NET/WPF、Windows Script Host。界面不支持 Linux/macOS。
-- Node.js 22 或更高版本，`node.exe` 位于 PATH；无需 `npm install`，仅使用 Node 内置模块。
+- 便携包内置 Node.js，无需另行安装。直接运行源码时需要 Node.js 22 或更高版本，`node.exe` 位于 PATH；无需 `npm install`，仅使用 Node 内置模块。
 - 本机安装并登录 Codex。脚本通过 `codex.exe app-server --stdio` 读取额度，需要对应版本提供 `account/rateLimits/read` 等接口。
 - 默认查找 `%LOCALAPPDATA%\OpenAI\Codex\bin` 中的可执行文件，也会回退到 PATH 中的 `codex.exe`。可通过环境变量 `CODEX_QUOTA_CODEX_PATH` 指定完整路径。
 
 ## 启动
+
+普通用户使用 `CodexQuotaMonitor-版本-win-x64-portable.zip`（Windows ARM64 使用对应 arm64 包），先完整解压，再进入 `CodexQuotaMonitor` 文件夹双击 `Start.vbs`。保留 `runtime` 文件夹，不要在 ZIP 内直接运行。仍需在本机安装并登录 Codex，Windows PowerShell 5.1、.NET/WPF 和 Windows Script Host 也需要可用。
+
+GitHub 的自动生成 `Source code (zip)` 是源码包，不包含 Node.js。便携包通过下述脚本生成。
 
 下载源码到可写目录，双击 `Start.vbs`。也可以从仓库目录执行：
 
@@ -31,6 +35,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Monitor.ps1
 `Settings.vbs` 直接打开自动规则。关闭主窗口会收起到托盘；选择“退出监控”才停止。程序需保持运行，电脑睡眠或关机时不会采集。
 
 默认每分钟采集一次；异常会退避重试。额度恢复或重置通知持续置顶，直到手动关闭。首次读取和账号切换只建立基线，不假报重置。
+
+## 制作无需安装 Node.js 的便携包
+
+打包电脑只需 Windows PowerShell 5.1 和网络，无需安装 Node.js 或 npm。在源码目录运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Portable.ps1
+# 可选：制作 Windows ARM64 包
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Portable.ps1 -Architecture arm64
+```
+
+输出在 `dist/`，包含 ZIP 和 SHA-256 校验文件。脚本从 [Node.js 官方发布目录](https://nodejs.org/dist/v24.22.1/) 下载固定版本，校验官方 SHA-256，仅提取 `node.exe` 与许可证。下载缓存放在 `.build-cache/`，二次构建可复用。支持 `-OutputDirectory` 指定输出位置。
+
+这是包含运行时的便携文件夹包，解压即用，无需安装 Node.js、npm 或修改 PATH；不是单文件 EXE。打包采用源文件白名单，不会带入 `data/`、密钥、QQ、账号状态或历史备份。不要直接压缩自己正在运行的整个目录进行分发。升级时退出监控，替换程序文件，保留自己的 `data/`。
 
 ## 自动执行规则
 
