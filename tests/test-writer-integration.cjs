@@ -27,7 +27,7 @@ async function waitTurn(client,threadId,turnId){
  const deadline=Date.now()+20000;
  while(Date.now()<deadline){
   let page;
-  try{page=await client.request('thread/turns/list',{threadId,sortDirection:'asc',limit:10,itemsView:'full'});}
+  try{page=await client.request('thread/turns/list',{threadId,sortDirection:'desc',limit:50,itemsView:'full'});}
   catch(e){if(e.rpcCode!==-32601)throw e;}
   const turn=page?.data.find(x=>x.id===turnId);
   if(turn&&turn.status!=='inProgress'){assert.equal(turn.status,'completed',JSON.stringify(turn.error));return;}
@@ -50,7 +50,7 @@ async function waitTurn(client,threadId,turnId){
  const first=(await owner.request('turn/start',{threadId:thread.id,input:[{type:'text',text:'original local fixture'}]})).turn;
  await waitTurn(owner,thread.id,first.id);
  const data=path.join(root,'monitor-data');fs.mkdirSync(data);
- const rule={id:'writer-test',name:'Local writer test',enabled:true,type:'daily',times:['08:00'],message:'replacement local fixture',existingThreadId:thread.id,runLimit:2,activationId:'test'};
+ const rule={id:'writer-test',name:'Local writer test',enabled:true,type:'daily',times:['08:00'],message:'replacement local fixture',existingThreadId:thread.id,runLimit:2,activationId:'test',messageAction:'replaceLast',replaceLastConfirmed:true};
  atomic(path.join(data,'schedule-rules.json'),{version:1,timeZone:'Asia/Shanghai',rules:[rule]});
  scheduler=new Scheduler(data,{makeClient});
  const skipped=await scheduler.execute(rule,'locked');
@@ -123,6 +123,37 @@ async function waitTurn(client,threadId,turnId){
  const releasedAgain=await scheduler.execute(afterUnsubscribe,'unsubscribe-released');
  assert.equal(releasedAgain.status,'success',releasedAgain.message);assert.equal(releasedAgain.threadId,boundId);
  console.log('PASS: resume then unsubscribe retains writer immediately -> safe skip; owner exit releases it -> same target succeeds.');
+ await close(clients[clients.length-1]);
+ const seed=makeClient();await seed.init();await seed.request('thread/resume',{threadId:boundId,excludeTurns:true});
+ for(let i=0;i<12;i++){
+  const turn=(await seed.request('turn/start',{threadId:boundId,input:[{type:'text',text:'preserved history '+i}]})).turn;
+  await waitTurn(seed,boundId,turn.id);
+ }
+ const beforeAppend=await seed.request('thread/turns/list',{threadId:boundId,sortDirection:'asc',limit:50,itemsView:'full'});
+ assert.equal(beforeAppend.data.length,13);await close(seed);
+ const appendRule={...rule,id:'append-test',existingThreadId:boundId,messageAction:'append',replaceLastConfirmed:false,message:'continue local fixture'};
+ for(let i=0;i<2;i++){
+  const appended=await scheduler.execute(appendRule,'append-'+i);
+  assert.equal(appended.status,'success',appended.message);assert.equal(appended.threadId,boundId);assert.equal(appended.backup,undefined);
+  await close(clients[clients.length-1]);
+ }
+ const afterAppend=await reader.request('thread/turns/list',{threadId:boundId,sortDirection:'asc',limit:50,itemsView:'full'});
+ assert.equal(afterAppend.data.length,15);
+ assert.deepEqual(afterAppend.data.slice(0,13),beforeAppend.data,'all 13 original turns preserved byte-for-byte as returned');
+ for(const turn of afterAppend.data.slice(13))assert.equal(turn.items.find(x=>x.type==='userMessage').content.filter(x=>x.type==='text').map(x=>x.text).join(''),appendRule.message);
+ assert.equal(scheduler.count(appendRule),2);
+ console.log('PASS: append twice to a real 13-turn task -> all 13 original turns unchanged, 15 total turns, same thread ID, count 2, no history revert.');
+ const replaceRule={...appendRule,id:'replace-last-test',messageAction:'replaceLast',replaceLastConfirmed:true,message:'edited final local fixture'};
+ for(let i=0;i<2;i++){
+  const replaced=await scheduler.execute(replaceRule,'replace-last-'+i);
+  assert.equal(replaced.status,'success',replaced.message);assert.equal(replaced.threadId,boundId);assert.ok(replaced.backup);
+  await close(clients[clients.length-1]);
+  const afterEdit=await reader.request('thread/turns/list',{threadId:boundId,sortDirection:'asc',limit:50,itemsView:'full'});
+  assert.equal(afterEdit.data.length,15);
+  assert.deepEqual(afterEdit.data.slice(0,14),afterAppend.data.slice(0,14),'editing the final message never reverts earlier turns');
+  assert.equal(afterEdit.data.at(-1).items.find(x=>x.type==='userMessage').content.filter(x=>x.type==='text').map(x=>x.text).join(''),replaceRule.message);
+ }
+ console.log('PASS: edit final user message twice in the real 15-turn task -> preceding 14 turns unchanged, same thread, last turn only replaced.');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{
  releaseHeldResponse?.();
  scheduler?.stop();await Promise.all(clients.map(close));server.closeAllConnections();server.close();

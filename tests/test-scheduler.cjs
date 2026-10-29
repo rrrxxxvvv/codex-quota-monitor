@@ -7,7 +7,7 @@ const {transition}=require('../quota-core.cjs');
 const {Scheduler,atomic}=require('../scheduler.cjs');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'scheduler-tests-'));
 const id='11111111-1111-4111-8111-111111111111';
-const rule={id:'morning',name:'每日节奏',enabled:true,times:['08:00','13:00','18:00'],existingThreadId:''};
+const rule={id:'morning',name:'每日节奏',enabled:true,times:['08:00','13:00','18:00'],existingThreadId:'',messageAction:'replaceLast',replaceLastConfirmed:true};
 const config=validateConfig({version:1,timeZone:'Asia/Shanghai',rules:[rule]});
 const now=Date.parse('2026-10-27T00:00:05Z');
 assert.deepEqual(beijing(now),{date:'2026-10-27',time:'08:00'});
@@ -42,10 +42,11 @@ class FakeClient {
    if(s.created && !s.sent)throw new Error('invalid paginated history lineage: missing source rollout');
    if(s.sent && s.pendingHistory){s.pendingHistory--;throw Object.assign(new Error('paginated_threads is not supported yet'),{rpcCode:-32601,rpcMethod:method});}
    if(s.sent && s.interruptedSnapshot){s.interruptedSnapshot--;s.snapshotRuntimeActive=!s.reallyInterrupted;return {data:s.turns.map(t=>({...t,status:'interrupted'})),nextCursor:null};}
-   return {data:s.turns,nextCursor:null};
+   const ordered=p.sortDirection==='desc'?[...s.turns].reverse():s.turns;
+   return {data:ordered.slice(0,p.limit||50),nextCursor:ordered.length>(p.limit||50)?'more':null};
   }
-  if(method==='thread/revert'){assert.equal(p.beforeTurnId,s.turns[0].id);s.reverts++;s.turns=[];return {thread:{id}};}
-  if(method==='turn/start'){assert.equal(s.turns.length,0,'no append to history');s.sent++;s.turns=[{id:'turn-'+s.sent,status:s.longRunning?'inProgress':'completed',items:[{type:'userMessage',content:[{type:'text',text:p.input[0].text}]}]}];return {turn:s.turns[0]};}
+  if(method==='thread/revert'){assert.equal(p.beforeTurnId,s.turns.at(-1).id);s.reverts++;s.turns=s.turns.slice(0,-1);return {thread:{id}};}
+  if(method==='turn/start'){if(!s.allowAppend)assert.equal(s.turns.length,0,'no append in replacement mode');s.sent++;const turn={id:'turn-'+s.sent,status:s.longRunning?'inProgress':'completed',items:[{type:'userMessage',content:[{type:'text',text:p.input[0].text}]}]};s.turns.push(turn);return {turn};}
   throw new Error('unexpected '+method);
  }
 }
@@ -56,6 +57,26 @@ function setup(name,server,existing=''){
 }
 function server(){return {calls:[],turns:[],sent:0,created:0,reverts:0};}
 (async()=>{
+ const legacyServer=server();const legacyCase=setup('legacy-action',legacyServer);
+ await legacyCase.scheduler.execute({...legacyCase.r,messageAction:undefined},'missing-action');
+ await legacyCase.scheduler.execute({...legacyCase.r,replaceLastConfirmed:false},'unconfirmed-action');
+ assert.deepEqual(legacyServer.calls,[],'unreviewed rules never connect or mutate');legacyCase.scheduler.stop();
+ const appendServer=server();appendServer.allowAppend=true;
+ appendServer.turns=Array.from({length:13},(_,i)=>({id:'old-'+i,status:'completed',items:[{type:'userMessage',content:[{type:'text',text:'old '+i}]}]}));
+ const oldHistory=JSON.parse(JSON.stringify(appendServer.turns));
+ const appendCase=setup('append-history',appendServer,id);appendCase.r.messageAction='append';appendCase.r.message='继续';
+ assert.equal((await appendCase.scheduler.execute(appendCase.r,'append-one')).status,'success');
+ assert.equal((await appendCase.scheduler.execute(appendCase.r,'append-two')).status,'success');
+ assert.deepEqual(appendServer.turns.slice(0,13),oldHistory);assert.equal(appendServer.turns.length,15);assert.equal(appendServer.reverts,0);assert.equal(appendCase.scheduler.count(appendCase.r),2);
+ assert.ok(!fs.existsSync(path.join(appendCase.dir,'history-backups')),'append does not need destructive-history backup');
+ const beforeLastEdit=JSON.parse(JSON.stringify(appendServer.turns));
+ const editRule={...appendCase.r,messageAction:'replaceLast',replaceLastConfirmed:true,message:'replacement of final message'};
+ assert.equal((await appendCase.scheduler.execute(editRule,'edit-last')).status,'success');
+ assert.deepEqual(appendServer.turns.slice(0,14),beforeLastEdit.slice(0,14));assert.equal(appendServer.turns.length,15);assert.equal(appendServer.reverts,1);
+ appendServer.turns.at(-1).items.push({type:'userMessage',content:[{type:'text',text:'steered input'}]});
+ assert.equal((await appendCase.scheduler.execute(editRule,'multi-user-last-turn')).status,'failed');
+ assert.equal(appendServer.reverts,1,'multi-user final turn must not be reverted');appendCase.scheduler.stop();
+ console.log('PASS: append preserves 13 original turns; edit-last preserves the preceding 14 turns; ambiguous multi-message last turn stops before mutation.');
  const transient=server();transient.pendingHistory=1;transient.interruptedSnapshot=1;
  const startup=setup('history-startup',transient);
  assert.equal((await startup.scheduler.execute(startup.r,'startup')).status,'success');
@@ -77,7 +98,7 @@ function server(){return {calls:[],turns:[],sent:0,created:0,reverts:0};}
  const u=server();u.fail='turn/start';const uncertain=setup('uncertain',u);assert.equal((await uncertain.scheduler.execute(uncertain.r,'uncertain')).status,'uncertain');assert.ok(uncertain.scheduler.state.blocked.morning);
  await assert.rejects(()=>uncertain.scheduler.execute(uncertain.r,'next'));uncertain.scheduler.stop();
  const restart=new Scheduler(uncertain.dir,{makeClient:()=>new FakeClient(u)});assert.ok(restart.state.blocked.morning);restart.stop();
- const v=server();v.turns=[{id:'old',status:'completed',items:[]}];const existing=setup('existing',v,id);assert.equal((await existing.scheduler.execute(existing.r,'one')).status,'success');assert.equal(v.created,0);assert.equal(v.reverts,1);assert.equal(v.turns.length,1);existing.scheduler.stop();
+ const v=server();v.turns=[{id:'old',status:'completed',items:[{type:'userMessage',content:[{type:'text',text:'original'}]}]}];const existing=setup('existing',v,id);assert.equal((await existing.scheduler.execute(existing.r,'one')).status,'success');assert.equal(v.created,0);assert.equal(v.reverts,1);assert.equal(v.turns.length,1);existing.scheduler.stop();
  const w=server();const interrupted=setup('interrupted',w);interrupted.scheduler.state.runs.crash={ruleId:'morning',at:new Date().toISOString(),status:'running',phase:'creating'};interrupted.scheduler.save();interrupted.scheduler.stop();
  const recovery=new Scheduler(interrupted.dir,{makeClient:()=>new FakeClient(w)});assert.equal(recovery.state.runs.crash.status,'uncertain');assert.ok(recovery.state.blocked.morning);assert.equal(w.created,0);recovery.stop();
  const quotaDir=path.join(root,'quota');fs.mkdirSync(quotaDir);
@@ -108,9 +129,9 @@ function server(){return {calls:[],turns:[],sent:0,created:0,reverts:0};}
  await anyEngine.tick();assert.equal(anyServer.sent,1);
  anyEngine.observeQuota(nextEvent);anyEngine.state.quotaQueue[0].detectedAt=Date.now()-601000;await anyEngine.tick();assert.equal(anyServer.sent,1,'expired event is not replayed');anyEngine.stop();
  assert.throws(()=>validateConfig({...config,rules:[{...qr,runLimit:0}]}));
- // Custom text is preserved on first creation, first-turn replacement and quota triggers.
+ // Custom text is preserved on creation, final-turn replacement and quota triggers.
  const cs=server(),custom=setup('custom',cs);
- const lockedServer=server();lockedServer.turns=[{id:'previous',status:'completed',items:[]}];
+ const lockedServer=server();lockedServer.turns=[{id:'previous',status:'completed',items:[{type:'userMessage',content:[{type:'text',text:'original'}]}]}];
  lockedServer.fail='thread/resume';lockedServer.failMessage=`thread ${id} already has an active writer`;
  const locked=setup('writer-conflict',lockedServer,id);
  const lockedRun=await locked.scheduler.execute(locked.r,'locked-first');
@@ -119,7 +140,7 @@ function server(){return {calls:[],turns:[],sent:0,created:0,reverts:0};}
  assert.equal(locked.scheduler.state.blocked.morning,undefined);assert.equal(lockedRun.error.rpcMethod,'thread/resume');
  lockedServer.fail=null;await locked.scheduler.execute(locked.r,'after-unlock');
  assert.equal(lockedServer.sent,1);assert.equal(lockedServer.reverts,1);locked.scheduler.stop();
- const lateConflictServer=server();lateConflictServer.turns=[{id:'previous',status:'completed',items:[]}];
+ const lateConflictServer=server();lateConflictServer.turns=[{id:'previous',status:'completed',items:[{type:'userMessage',content:[{type:'text',text:'original'}]}]}];
  lateConflictServer.fail='turn/start';lateConflictServer.failMessage=`thread ${id} already has an active writer`;
  const lateConflict=setup('writer-after-revert',lateConflictServer,id);
  assert.equal((await lateConflict.scheduler.execute(lateConflict.r,'late-conflict')).status,'uncertain');
@@ -159,7 +180,7 @@ function server(){return {calls:[],turns:[],sent:0,created:0,reverts:0};}
    assert.equal(ts.sent,1,type+' trigger through scheduler');assert.equal(ts.turns[0].items[0].content[0].text,tr.message);
    assert.equal(timed.scheduler.count(tr),1);assert.ok(timed.scheduler.exhausted(tr));timed.scheduler.stop();
  }
- console.log('PASS: custom text, first-message replacement, long-task connection lifetime, busy skip, completion, shutdown, dated/interval tick path and once limits.');
- console.log('PASS: Beijing time, daily schedule, invalid inputs, disabled/blocked rules, missed times, deduplication, first creation, fixed binding, first-turn revert, restart, busy task, account switch, uncertain send, existing task, crash recovery.');
+ console.log('PASS: custom text, last-message replacement, long-task connection lifetime, busy skip, completion, shutdown, dated/interval tick path and once limits.');
+ console.log('PASS: Beijing time, daily schedule, invalid inputs, disabled/blocked rules, missed times, deduplication, first creation, fixed binding, last-turn revert, restart, busy task, account switch, uncertain send, existing task, crash recovery.');
  console.log('PASS: quota reset rules, baseline suppression, window filter, cycle deduplication, combined resets, expiry, trigger limits, restart and reactivation.');
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -29,6 +29,7 @@ function Click-Button($content) {
 try {
     Show-ScheduleWindow
     if ($script:ruleEnabled.IsChecked) { throw 'New rules should be disabled' }
+    if ($script:messageAction.SelectedIndex -ne 0) { throw 'New rules must append by default' }
     $script:ruleName.Text = '设置保存验证'
     $script:ruleTimes.Text = '08:00, 13:00, 18:00'
     $script:ruleThread.Text = 'codex://threads/11111111-1111-4111-8111-111111111111'
@@ -37,6 +38,24 @@ try {
     if ($saved.rules.Count -ne 1 -or $saved.rules[0].enabled -or $saved.rules[0].times.Count -ne 3) { throw 'Save round trip failed' }
     if ($saved.rules[0].existingThreadId -ne '11111111-1111-4111-8111-111111111111') { throw 'Thread link normalization failed' }
     $originalId = $saved.rules[0].id
+    if ($saved.rules[0].messageAction -ne 'append' -or $saved.rules[0].replaceLastConfirmed) { throw 'Append default did not persist' }
+    $script:messageAction.SelectedIndex = 1
+    Click-Button '保存规则'
+    if ($script:scheduleFeedback.Text -notlike '*勾选允许替换*') { throw 'Unconfirmed replacement was accepted' }
+    $script:replaceLastConsent.IsChecked = $true
+    Click-Button '保存规则'
+    $saved = [IO.File]::ReadAllText((Join-Path $dataDir 'schedule-rules.json')) | ConvertFrom-Json
+    if ($saved.rules[0].messageAction -ne 'replaceLast' -or -not $saved.rules[0].replaceLastConfirmed) { throw 'Explicit replacement did not persist' }
+    $script:scheduleRules[0].PSObject.Properties.Remove('messageAction')
+    $script:scheduleRules[0].PSObject.Properties.Remove('replaceLastConfirmed')
+    $script:scheduleRules[0].enabled = $true
+    Select-Rule $originalId
+    if ($script:messageAction.SelectedIndex -ne -1 -or $script:ruleEnabled.IsChecked) { throw 'Legacy rule silently adopted an action' }
+    Click-Button '保存规则'
+    if ($script:scheduleFeedback.Text -notlike '*请选择发送方式*') { throw 'Legacy rule saved without action selection' }
+    $script:messageAction.SelectedIndex = 0
+    Click-Button '保存规则'
+    Write-Output 'PASS: append default, explicit replacement consent, and legacy rules require an action selection before re-enabling.'
     $script:ruleName.Text = '修改后名称'; $script:ruleTimes.Text = '09:00'
     Click-Button '保存规则'
     $saved = [IO.File]::ReadAllText((Join-Path $dataDir 'schedule-rules.json')) | ConvertFrom-Json

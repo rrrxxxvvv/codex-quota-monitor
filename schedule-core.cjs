@@ -17,6 +17,11 @@ function validateConfig(input) {
     if(!['daily','quotaReset','dates','interval'].includes(type))throw new Error(`${r.name}：未知或尚未开放的触发器。`);
     const message=r.message ?? '你好';
     if(typeof message!=='string'||!message.trim()||message.length>20000)throw new Error(`${r.name}：消息内容需要 1–20000 字，不能全为空白。`);
+    const legacyAction=!r.messageAction || r.messageAction==='replaceFirst';
+    const messageAction=legacyAction?'append':r.messageAction;
+    if(!['append','replaceLast'].includes(messageAction))throw new Error(`${r.name}：发送方式无效。`);
+    const replaceLastConfirmed=r.replaceLastConfirmed===true;
+    const needsActionReview=legacyAction || r.needsActionReview===true || (messageAction==='replaceLast'&&!replaceLastConfirmed);
     const quotaWindow=r.quotaWindow ?? 'any';
     if(!['any','fiveHour','weekly'].includes(quotaWindow))throw new Error(`${r.name}：额度范围无效。`);
     const runLimit=r.runLimit ?? null;
@@ -35,7 +40,7 @@ function validateConfig(input) {
     if(link)existingThreadId=link[1];
     if(existingThreadId && !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(existingThreadId))throw new Error(`${r.name}：请输入完整本机会话 ID 或 codex://threads/ 会话链接。`);
     existingThreadId=existingThreadId.toLowerCase();
-    return {id:r.id,name:r.name.trim(),enabled:r.enabled,type,message,quotaWindow,runLimit,activationId,times:[...new Set(times)].sort(),dates:[...new Set(dates)].sort(),startAt,intervalMinutes,existingThreadId};
+    return {id:r.id,name:r.name.trim(),enabled:r.enabled&&!needsActionReview,type,message,messageAction,replaceLastConfirmed,needsActionReview,quotaWindow,runLimit,activationId,times:[...new Set(times)].sort(),dates:[...new Set(dates)].sort(),startAt,intervalMinutes,existingThreadId};
   });
   return {version:1,timeZone:'Asia/Shanghai',rules};
 }

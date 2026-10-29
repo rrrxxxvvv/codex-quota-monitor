@@ -10,7 +10,7 @@ function Refresh-RuleList {
     $script:ruleList.Items.Clear()
     foreach ($rule in $script:scheduleRules) {
         $item = New-Object System.Windows.Controls.ListBoxItem
-        $stateLabel = if ($rule.enabled) { '已启用' } else { '未启用' }
+        $stateLabel = if (-not $rule.messageAction -or $rule.needsActionReview) { '待选择发送方式' } elseif ($rule.enabled) { '已启用' } else { '未启用' }
         $condition = if ($rule.type -eq 'quotaReset') {
             $scope = switch ($rule.quotaWindow) { 'fiveHour' { '五小时' }; 'weekly' { '每周' }; default { '任一额度' } }
             "额度刷新 · $scope"
@@ -32,6 +32,11 @@ function Update-RuleTypeFields {
 function Update-RunLimitFields {
     if ($script:runLimitBox) { $script:runLimitBox.Visibility = if ($script:runMode.SelectedIndex -eq 1) { 'Visible' } else { 'Collapsed' } }
     Update-TriggerProgress
+}
+function Update-MessageActionFields {
+    if (-not $script:replaceLastConsent) { return }
+    $script:replaceLastConsent.Visibility = if ($script:messageAction.SelectedIndex -eq 1) { 'Visible' } else { 'Collapsed' }
+    $script:messageActionHelp.Text = if ($script:messageAction.SelectedIndex -eq 1) { '替换最后一轮用户消息及对应回复，保留此前各轮历史，执行前备份。若最后一轮含多条用户消息，则停止并提示手动处理。' } else { '在原会话末尾发送上面的内容，保留全部已有对话。适合发送“继续”或安排新的工作。' }
 }
 function Update-TriggerProgress {
     if (-not $script:triggerProgress) { return }
@@ -58,6 +63,9 @@ function Select-Rule($id) {
         $script:ruleEnabled.IsChecked = $rule.enabled
         $script:ruleType.SelectedIndex = switch ($rule.type) { 'quotaReset' { 1 }; 'dates' { 2 }; 'interval' { 3 }; default { 0 } }
         $script:ruleMessage.Text = if ($null -ne $rule.message) { $rule.message } else { '你好' }
+        $script:messageAction.SelectedIndex = switch ($rule.messageAction) { 'append' { 0 }; 'replaceLast' { 1 }; default { -1 } }
+        $script:replaceLastConsent.IsChecked = $rule.replaceLastConfirmed -eq $true
+        if (-not $rule.messageAction -or $rule.needsActionReview) { $script:ruleEnabled.IsChecked = $false }
         foreach ($date in $rule.dates) { $script:ruleDates.Items.Add($date.Replace('T', ' ')) | Out-Null }
         if ($rule.type -eq 'interval') {
             Set-RuleDateTime $script:intervalPicker $rule.startAt
@@ -70,6 +78,8 @@ function Select-Rule($id) {
         $script:ruleName.Text = ''
         $script:ruleTimes.Text = ''
         $script:ruleMessage.Text = '你好'
+        $script:messageAction.SelectedIndex = 0
+        $script:replaceLastConsent.IsChecked = $false
         $script:ruleThread.Text = ''
         $script:ruleEnabled.IsChecked = $false
         $script:ruleType.SelectedIndex = 0
@@ -78,6 +88,7 @@ function Select-Rule($id) {
         $script:runLimit.Text = '1'
     }
     Update-RuleTypeFields
+    Update-MessageActionFields
     Update-RunLimitFields
     $script:scheduleFeedback.Text = ''
     Update-ScheduleStatus
@@ -113,7 +124,7 @@ function Update-ScheduleStatus {
             }
             $savedActivation = if ($savedRule.activationId) { $savedRule.activationId } else { 'legacy' }
             $liveActivation = if ($liveRule.activationId) { $liveRule.activationId } else { 'legacy' }
-            if (($liveRule.autoDisabled -or $liveRule.blocked) -and $savedRule.enabled -and $savedActivation -eq $liveActivation) {
+            if (($liveRule.autoDisabled -or $liveRule.blocked -or $liveRule.needsActionReview) -and $savedRule.enabled -and $savedActivation -eq $liveActivation) {
                 $savedRule.enabled = $false
                 $bindingsChanged = $true
                 if ($savedRule.id -eq $script:editingRuleId) { $script:ruleEnabled.IsChecked = $false }
@@ -134,7 +145,8 @@ function Update-ScheduleStatus {
                 $script:ruleThread.IsReadOnly = $false
             }
             if ($null -ne $rule.runLimit) { $info.Add("已触发 $($rule.triggerCount) / $($rule.runLimit) 次") }
-            if ($rule.blocked) { $info.Add('异常已停用：' + $rule.blocked.message + '。修正后重新勾选启用并保存。') }
+            if ($rule.needsActionReview) { $info.Add('旧规则已暂停：请选择发送方式后保存并启用。默认追加保留全部历史；编辑末条仅替换最后一轮。') }
+            elseif ($rule.blocked) { $info.Add('异常已停用：' + $rule.blocked.message + '。修正后重新勾选启用并保存。') }
             elseif ($rule.autoDisabled) { $info.Add('已达到次数上限，规则自动关闭。重新启用并保存将从 0 次开始。') }
             elseif ($rule.enabled -and $rule.type -eq 'quotaReset') { $info.Add('等待接口确认额度刷新。首次读取不触发，同一额度周期最多执行一次。') }
             elseif ($rule.nextAt) { $info.Add('下次执行（北京时间）：' + [DateTimeOffset]::Parse($rule.nextAt).ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd HH:mm')) }
@@ -371,6 +383,17 @@ function Show-ScheduleWindow {
     $script:intervalFields.Children.Add($intervalRow) | Out-Null
     $editor.Children.Add($script:intervalFields) | Out-Null
     $editor = New-RuleSection $editorRoot '消息与会话'
+    $editor.Children.Add((New-Text '发送方式（与触发器、消息内容独立设置）' 14 '#182848')) | Out-Null
+    $script:messageAction = New-Object System.Windows.Controls.ComboBox
+    $script:messageAction.Items.Add('追加消息 · 保留历史（默认）') | Out-Null
+    $script:messageAction.Items.Add('编辑末条用户消息并重发 · 保留此前历史') | Out-Null
+    $script:messageAction.FontSize = 14; $script:messageAction.Padding = '8'; $script:messageAction.Margin = '0,0,0,10'
+    $script:messageAction.Add_SelectionChanged({ Update-MessageActionFields })
+    $editor.Children.Add($script:messageAction) | Out-Null
+    $script:messageActionHelp = New-Text '' 12 '#8A5A20'; $editor.Children.Add($script:messageActionHelp) | Out-Null
+    $script:replaceLastConsent = New-Object System.Windows.Controls.CheckBox
+    $script:replaceLastConsent.Content = '允许此规则替换最后一轮用户消息及对应回复'
+    $script:replaceLastConsent.Margin = '0,0,0,12'; $editor.Children.Add($script:replaceLastConsent) | Out-Null
     $editor.Children.Add((New-Text '消息内容 · 支持多行，最多 20000 字' 13 '#64748B')) | Out-Null
     $script:ruleMessage = New-RuleTextBox
     $script:ruleMessage.AcceptsReturn = $true; $script:ruleMessage.TextWrapping = 'Wrap'; $script:ruleMessage.Height = 130; $script:ruleMessage.VerticalContentAlignment = 'Top'
@@ -379,7 +402,6 @@ function Show-ScheduleWindow {
     $editor.Children.Add((New-Text '新建会话沿用只读权限；自定义消息不会自动授予文件修改或命令审批权限。' 12 '#53627B')) | Out-Null
     $editor.Children.Add((New-Text '会话链接或 ID（首次留空，触发后自动回填并保存）' 14 '#182848')) | Out-Null
     $script:ruleThread = New-RuleTextBox; $editor.Children.Add($script:ruleThread) | Out-Null
-    $editor.Children.Add((New-Text '每次用上面的内容编辑首条并重发，会移除当前路径后续历史；执行前会保存本地历史备份。请绑定专用会话。' 12 '#8A5A20')) | Out-Null
     $editor.Children.Add((New-Text 'Codex 桌面端可同时使用其他会话。专用会话建议留给监控使用；在桌面端打开过后，仅切走不一定立即释放占用，占用期间触发会跳过。' 12 '#53627B')) | Out-Null
     $editor = New-RuleSection $editorRoot '运行方式'
     $script:runMode = New-Object System.Windows.Controls.ComboBox
@@ -412,6 +434,9 @@ function Show-ScheduleWindow {
             $ruleType = switch ($script:ruleType.SelectedIndex) { 0 { 'daily' }; 1 { 'quotaReset' }; 2 { 'dates' }; 3 { 'interval' }; default { throw '该触发器暂未开放。' } }
             $message = $script:ruleMessage.Text
             if (-not $message.Trim() -or $message.Length -gt 20000) { throw '消息内容需要 1–20000 字，不能全为空白。' }
+            $action = switch ($script:messageAction.SelectedIndex) { 0 { 'append' }; 1 { 'replaceLast' }; default { throw '请选择发送方式：追加消息，或编辑末条用户消息并重发。' } }
+            $replaceLastConfirmed = $action -eq 'replaceLast' -and $script:replaceLastConsent.IsChecked -eq $true
+            if ($action -eq 'replaceLast' -and -not $replaceLastConfirmed) { throw '编辑末条会替换最后一轮。请勾选允许替换，或改用追加消息。' }
             $quotaWindow = switch ($script:quotaWindow.SelectedIndex) { 0 { 'fiveHour' }; 1 { 'weekly' }; default { 'any' } }
             $times = @()
             if ($ruleType -eq 'daily') {
@@ -447,7 +472,7 @@ function Show-ScheduleWindow {
             $reenabling = $script:ruleEnabled.IsChecked -and $oldRule -and -not $oldRule.enabled
             $activationId = if ($oldRule.activationId) { $oldRule.activationId } else { 'legacy' }
             if (-not $oldRule -or $reenabling -or $oldRule.runLimit -ne $limitValue) { $activationId = [Guid]::NewGuid().ToString() }
-            $replacement = [PSCustomObject]@{id = $id; name = $name; enabled = [bool]$script:ruleEnabled.IsChecked; type = $ruleType; message = $message; quotaWindow = $quotaWindow; runLimit = $limitValue; activationId = $activationId; times = $times; dates = $dates; startAt = $startAt; intervalMinutes = $intervalMinutes; existingThreadId = $threadId}
+            $replacement = [PSCustomObject]@{id = $id; name = $name; enabled = [bool]$script:ruleEnabled.IsChecked; type = $ruleType; message = $message; messageAction = $action; replaceLastConfirmed = [bool]$replaceLastConfirmed; needsActionReview = $false; quotaWindow = $quotaWindow; runLimit = $limitValue; activationId = $activationId; times = $times; dates = $dates; startAt = $startAt; intervalMinutes = $intervalMinutes; existingThreadId = $threadId}
             $found = $false
             for ($i = 0; $i -lt $script:scheduleRules.Count; $i++) {
                 if ($script:scheduleRules[$i].id -eq $id) { $script:scheduleRules[$i] = $replacement; $found = $true; break }

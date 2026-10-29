@@ -1,11 +1,17 @@
 const assert=require('node:assert/strict');
 const {validateConfig,dueJobs,nextTime,dateTimeMs,matchesQuota}=require('../schedule-core.cjs');
-const base={id:'test',name:'测试',enabled:true,times:['08:00']};
+const base={id:'test',name:'测试',enabled:true,times:['08:00'],messageAction:'append'};
 const config=r=>validateConfig({version:1,timeZone:'Asia/Shanghai',rules:[{...base,...r}]});
 const rule=r=>config(r).rules[0];
 const state={runs:{},blocked:{}};
 const ms=value=>Date.parse(value+':00+08:00');
 assert.equal(rule({}).message,'你好');
+const legacy=rule({messageAction:undefined,message:'继续'});
+assert.equal(legacy.enabled,false);assert.equal(legacy.needsActionReview,true);assert.equal(legacy.messageAction,'append');
+assert.equal(dueJobs({rules:[legacy]},state,ms('2028-03-01T08:00')).length,0);
+assert.equal(rule({messageAction:'replaceLast'}).enabled,false,'replacement requires explicit consent');
+assert.equal(rule({messageAction:'replaceLast',replaceLastConfirmed:true}).enabled,true);
+assert.throws(()=>rule({messageAction:'unknown'}));
 for(const bad of ['', ' \n', 'x'.repeat(20001),123])assert.throws(()=>rule({message:bad}));
 assert.equal(rule({message:'  内容\n第二行  '}).message,'  内容\n第二行  ');
 assert.throws(()=>rule({type:'programSignal'}));

@@ -98,7 +98,7 @@ class Scheduler {
   phase(run,phase){run.phase=phase;this.save();this.publish();}
   async submittedTurns(client,run,allowPending=false){
     let page;
-    try{page=await client.request('thread/turns/list',{threadId:run.threadId,sortDirection:'asc',limit:3,itemsView:'full'});}
+    try{page=await client.request('thread/turns/list',{threadId:run.threadId,sortDirection:'desc',limit:3,itemsView:'full'});}
     catch(e){
       // A newly accepted turn can precede creation of its paginated history.
       if(allowPending && e.rpcCode===-32601 && /paginated_threads is not supported yet/.test(e.message))return {data:[],nextCursor:null};
@@ -124,11 +124,12 @@ class Scheduler {
   }
   async execute(rule,key,scheduledAt='手动执行',triggerAccountId=null){
     if(this.busy || this.stopped)return;
+    if(!['append','replaceLast'].includes(rule.messageAction) || rule.needsActionReview || (rule.messageAction==='replaceLast'&&rule.replaceLastConfirmed!==true))return;
     if(this.state.runs[key])return;
     if(this.exhausted(rule))return;
     if(this.state.blocked[rule.id])throw new Error('该规则存在待核对的异常，需先处理。');
     this.busy=true;
-    const run={ruleId:rule.id,at:new Date().toISOString(),scheduledAt,status:'running',phase:'checking',threadId:null,message:'正在检查账号与会话'};
+    const run={ruleId:rule.id,messageAction:rule.messageAction,at:new Date().toISOString(),scheduledAt,status:'running',phase:'checking',threadId:null,message:'正在检查账号与会话'};
     this.state.runs[key]=run;this.save();this.publish();
     if(this.activeRuns.has(rule.id)){
       run.status='skipped';run.message='此规则的上次任务仍在执行，本次跳过。';this.log(rule.id,run.message);this.busy=false;this.publish();return run;
@@ -147,7 +148,7 @@ class Scheduler {
       if(!binding && rule.existingThreadId){
         // Validate first, then pin the supplied ID. Never silently create a replacement.
         const found=await client.request('thread/read',{threadId:rule.existingThreadId,includeTurns:false});
-        if(found.thread.historyMode!=='paginated')throw new Error('此旧格式会话不支持编辑首条重发，请改用新的专用工作会话。');
+        if(found.thread.historyMode!=='paginated')throw new Error('此旧格式会话不支持所需的历史校验接口，请使用新版工作会话。');
         binding={threadId:rule.existingThreadId,accountId:before.accountId,createdByMonitor:false};
         this.state.bindings[rule.id]=binding;this.save();
       }
@@ -183,11 +184,13 @@ class Scheduler {
       if(resumed.thread.status.type==='active'){
         run.status='skipped';run.message='会话正在执行任务，本次跳过。';this.log(rule.id,run.message);return run;
       }
-      const turns=await this.allTurns(client,binding.threadId);
+      const turns=rule.messageAction==='replaceLast'?await this.allTurns(client,binding.threadId):(await client.request('thread/turns/list',{threadId:binding.threadId,sortDirection:'desc',limit:1,itemsView:'notLoaded'})).data;
       if(turns.some(t=>t.status==='inProgress')){
         run.status='skipped';run.message='会话有尚未结束的消息，本次跳过。';this.log(rule.id,run.message);return run;
       }
-      if(turns.length){
+      if(turns.length && rule.messageAction==='replaceLast'){
+        const lastTurn=turns[turns.length-1];
+        if(lastTurn.items.filter(i=>i.type==='userMessage').length!==1)throw new Error('最后一轮包含多条或没有用户消息，无法只编辑末条而保留其他消息；请改用追加发送或在 Codex 中手动编辑。');
         const current=await client.request('thread/read',{threadId:binding.threadId,includeTurns:false});
         if(current.thread.status.type==='active'||this.inspectActivity(current.thread.path)!=='idle'){
           run.status='skipped';run.message='编辑前检测到任务忙碌或状态未确认，本次跳过。';this.log(rule.id,run.message);return run;
@@ -196,9 +199,11 @@ class Scheduler {
         const backup=path.join(backupDir,`${binding.threadId}-${Date.now()}.json`);
         atomic(backup,{threadId:binding.threadId,at:new Date().toISOString(),turns});run.backup=backup;
         this.phase(run,'reverting');mutationAttempted=true;
-        await client.request('thread/revert',{threadId:binding.threadId,beforeTurnId:turns[0].id});
-        const empty=await client.request('thread/turns/list',{threadId:binding.threadId,sortDirection:'asc',limit:1,itemsView:'summary'});
-        if(empty.data.length)throw new Error('回退后历史未清空，已停止发送，避免累积上下文。');
+        run.replacedTurnId=lastTurn.id;
+        run.preservedTurnIds=turns.slice(0,-1).map(t=>t.id);this.save();
+        await client.request('thread/revert',{threadId:binding.threadId,beforeTurnId:lastTurn.id});
+        const retained=await this.allTurns(client,binding.threadId);
+        if(JSON.stringify(retained)!==JSON.stringify(turns.slice(0,-1)))throw new Error('编辑末条后的前序历史与备份不一致，已停止发送；请保留历史备份排查。');
       }
       }
       this.phase(run,'sending');mutationAttempted=true;
@@ -219,11 +224,22 @@ class Scheduler {
       }
       if(completed && completed.status!=='completed')throw new Error(`消息已提交但状态为 ${completed.status}：${completed.error?.message || '请检查会话'}`);
       const final=await this.submittedTurns(client,run);
-      const users=final.data.flatMap(t=>t.items).filter(i=>i.type==='userMessage');
-      if(final.data.length!==1 || final.nextCursor || final.data[0].id!==run.turnId || users.length!==1 || users[0].content.filter(x=>x.type==='text').map(x=>x.text).join('')!==message)throw new Error('发送后会话历史与预期不符，请核对；已暂停该规则。');
-      const currentTurn=final.data[0];
+      const currentTurn=final.data.find(t=>t.id===run.turnId);
+      const users=(currentTurn?.items || []).filter(i=>i.type==='userMessage');
+      const messageMatches=users.length===1 && users[0].content.filter(x=>x.type==='text').map(x=>x.text).join('')===message;
+      let historyMatches=true;
+      if(rule.messageAction==='replaceLast'){
+        const history=await this.allTurns(client,binding.threadId);
+        const expected=[...(run.preservedTurnIds || []),run.turnId];
+        historyMatches=JSON.stringify(history.map(t=>t.id))===JSON.stringify(expected);
+      }
+      if(!currentTurn || !messageMatches || !historyMatches){
+        // Store structure only: diagnostic output must not copy conversation text.
+        run.historyCheck={expectedTurnId:run.turnId,action:rule.messageAction,returnedTurnIds:final.data.map(t=>t.id),statuses:final.data.map(t=>t.status),hasMore:!!final.nextCursor,userMessageCount:users.length,messageMatches,historyMatches};
+        throw new Error('发送后消息校验未通过，已暂停规则；诊断详情见 schedule-state.json 中的 historyCheck。不会自动重发。');
+      }
       if(!['completed','inProgress'].includes(currentTurn.status))throw new Error(`消息已提交但状态为 ${currentTurn.status}：${currentTurn.error?.message || '请检查会话'}`);
-      run.status='success';run.phase='complete';run.message=created?'已创建并绑定专用会话，自定义消息发送成功。':'已在原会话编辑首条并重发自定义消息；当前历史只有一轮。';
+      run.status='success';run.phase='complete';run.message=created?'已创建并绑定会话，自定义消息发送成功。':rule.messageAction==='append'?'已在原会话末尾追加自定义消息，保留已有历史。':'已编辑末条用户消息并重发，保留此前各轮历史。';
       if(currentTurn.status==='inProgress'){
         run.status='running';run.phase='waiting';run.message+='任务仍在运行，后续触发会先检查是否空闲。';
         this.activeRuns.set(rule.id,{client,run,checking:false});
