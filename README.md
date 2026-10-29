@@ -1,4 +1,4 @@
-# Codex Quota Monitor v1.7.1
+# Codex Quota Monitor v1.7.2
 
 Windows 桌面额度监控：读取本机已登录 Codex 的额度，额度重置或增加后显示持续置顶提醒；可按时间或额度刷新规则发送自定义消息，并可将额度上传到 AstrBot，通过 QQ 查询和接收通知。
 
@@ -92,9 +92,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-Portable.ps1 -Ar
 
 界面通道需要解锁桌面，会暂时占用前台和键鼠。已有草稿不覆盖；用户输入、前台切换或锁屏会停止后续回退。可能已提交、草稿清理未确认或历史不匹配时暂停规则，不切换通道重发。目标任务仍在正常运行时不会强行中断。
 
-坐标取自控件实时位置，不写死屏幕位置，也不依赖皮肤颜色。当前任务菜单支持中英文标签，未识别的语言、多个主窗口或不唯一的编辑按钮会明确失败，不盲点。本机中文界面已做实际操作验证；其他分辨率、缩放、皮肤和客户端版本仍需对应环境验证。
+坐标取自控件实时位置，不写死屏幕位置，也不依赖皮肤颜色。任务菜单使用中英文标签定位，v1.7.2 会等待最多 8 秒供控件加载；菜单仍缺失、不唯一或不支持时，尝试默认的“复制任务链接”快捷键 Ctrl+Alt+L。两条途径都必须取得与配置完全一致的任务链接；快捷键被改动、剪贴板未更新或 ID 不符时停止发送，不会以标题或坐标猜测任务。用户输入或前台变化不会触发快捷键回退。
 
-每次界面操作在 `data/ui-automation/<运行ID>/` 保存 `status.json` 和 `helper.log`，临时消息计划结束即删除。关闭和重开助手在 `data/desktop-release/<运行ID>/status.json` 保存状态，监控意外退出时会尝试重开。规则状态区显示实际通道及完整日志路径。历史备份与规则配置包含用户内容，请勿随包分发。
+多个主窗口、不唯一的编辑按钮仍会明确失败。此前在本机中文界面验证过实际发送；本次菜单等待及快捷键回退通过组件回归测试，尚未在报告问题的另一台电脑上验证。其他分辨率、缩放、皮肤和客户端版本仍需对应环境验证。
+
+每次界面操作在 `data/ui-automation/<运行ID>/` 保存 `status.json` 和 `helper.log`，临时消息计划结束即删除。v1.7.2 的状态日志增加客户端文件版本、屏幕尺寸、可见按钮/菜单项数量、等待时间和复制链接路径，不采集聊天正文或屏幕截图；助手日志写入执行阶段和错误。若出现“聊天操作 (0)”，先更新后重试，若仍失败，提供本次这两个文件即可继续定位。关闭和重开助手在 `data/desktop-release/<运行ID>/status.json` 保存状态，监控意外退出时会尝试重开。规则状态区显示实际通道及完整日志路径。历史备份与规则配置包含用户内容，请勿随包分发。
 
 ## QQ 对接
 
@@ -156,6 +158,7 @@ node tests/test-schedule-core.cjs
 node tests/test-scheduler.cjs
 node tests/test-delivery.cjs
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/test-desktop-release.ps1
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/test-desktop-lookup.ps1
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File tests/test-schedule-ui.ps1
 ```
 

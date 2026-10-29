@@ -418,7 +418,7 @@ function Show-ScheduleWindow {
     $script:deliveryMode.FontSize = 14; $script:deliveryMode.Padding = '8'; $script:deliveryMode.Margin = '0,0,0,10'
     $editor.Children.Add($script:deliveryMode) | Out-Null
     $editor.Children.Add((New-Text '界面发送直接操作目标任务，不先尝试接口或自动关闭客户端。任务 ID 留空时，首次创建由接口初始化，后续触发使用界面；已有规则保留原通道。' 12 '#53627B')) | Out-Null
-    $editor.Children.Add((New-Text '界面通道需要桌面解锁，并短暂使用键鼠。通过任务菜单复制链接核对 ID；已有草稿不覆盖，用户输入或切换窗口会停止回退。按控件位置操作，适配分辨率和主题；当前支持中英文菜单，未识别时不盲点。诊断日志位于 data/ui-automation。' 12 '#53627B')) | Out-Null
+    $editor.Children.Add((New-Text '界面通道需要桌面解锁，并短暂使用键鼠。等待任务菜单加载，找不到时尝试 Ctrl+Alt+L 复制链接，必须核对 ID 才发送；已有草稿不覆盖，用户输入或切换窗口会停止回退。诊断日志位于 data/ui-automation，含客户端版本、控件数量及识别方式。' 12 '#53627B')) | Out-Null
     $script:releaseDesktopConsent = New-Object System.Windows.Controls.CheckBox
     $script:releaseDesktopConsent.Content = '允许最后一级关闭整个 Codex（可能中断其他任务），完成后重开'
     $script:releaseDesktopConsent.Margin = '0,8,0,8'

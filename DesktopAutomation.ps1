@@ -10,8 +10,9 @@ $sendNames = @('发送','Send','傳送','送信','보내기','Envoyer','Senden',
 $editNames = @('编辑消息','Edit message','編輯訊息','メッセージを編集','메시지 수정','Modifier le message','Nachricht bearbeiten','Editar mensaje','Editar mensagem','Modifica messaggio','Редактировать сообщение')
 $cancelNames = @('取消','Cancel','キャンセル','취소','Annuler','Abbrechen','Cancelar','Annulla','Отмена')
 function Publish-Ui($phase,$errorText) {
-    [IO.File]::WriteAllText((Join-Path $Directory 'status.json.tmp'), (@{phase=$phase;error=$errorText;restartAllowed=$restartAllowed;at=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json -Compress), $utf8)
+    [IO.File]::WriteAllText((Join-Path $Directory 'status.json.tmp'), (@{phase=$phase;error=$errorText;restartAllowed=$restartAllowed;at=[DateTime]::UtcNow.ToString('o');diagnostics=@([QuotaDesktop]::Diagnostics())} | ConvertTo-Json -Depth 4 -Compress), $utf8)
     Move-Item -LiteralPath (Join-Path $Directory 'status.json.tmp') -Destination (Join-Path $Directory 'status.json') -Force
+    Write-Output ([DateTime]::UtcNow.ToString('o') + ' ' + $phase + $(if($errorText){': '+$errorText}else{''}))
 }
 function Wait-Editor($names) {
     for($i=0;$i -lt 20;$i++){try{return [QuotaDesktop]::One(50004,$names)}catch{Start-Sleep -Milliseconds 200}}
