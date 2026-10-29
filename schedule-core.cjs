@@ -24,7 +24,7 @@ function validateConfig(input) {
     if(r.releaseDesktopOnConflict!==undefined && typeof r.releaseDesktopOnConflict!=='boolean')throw new Error(`${r.name}：主动释放客户端占用选项必须为布尔值。`);
     const releaseDesktopOnConflict=r.releaseDesktopOnConflict===true;
     const deliveryMode=r.deliveryMode ?? 'api';
-    if(!['api','apiUi','apiUiRestart'].includes(deliveryMode))throw new Error(`${r.name}：发送通道无效。`);
+    if(!['ui','api','apiUi','apiUiRestart'].includes(deliveryMode))throw new Error(`${r.name}：发送通道无效。`);
     if(deliveryMode==='apiUiRestart'&&!releaseDesktopOnConflict)throw new Error(`${r.name}：请确认允许关闭整个 Codex 客户端，或选择不重启的发送通道。`);
     const needsActionReview=legacyAction || r.needsActionReview===true || (messageAction==='replaceLast'&&!replaceLastConfirmed);
     const quotaWindow=r.quotaWindow ?? 'any';

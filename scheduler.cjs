@@ -125,6 +125,7 @@ class Scheduler {
     run.triggerNumber=this.count(rule);this.save();
   }
   async tryUi(client,rule,run){
+    run.deliveryRoute='ui';
     this.phase(run,'ui-preparing');
     const history=await this.allTurns(client,run.threadId);
     if(history.some(t=>t.status==='inProgress'))throw new Error('界面发送前发现任务仍在运行。');
@@ -170,6 +171,12 @@ class Scheduler {
     run.uiUncertain=true;throw new Error('界面点击发送后未能确认消息及前序历史，详情见 uiHistoryCheck；不会重发。');
   }
   async resumeThread(client,rule,run){
+    if(rule.deliveryMode==='ui'){
+      this.log(rule.id,'按规则直接通过 Codex 客户端界面发送。');
+      const uiTurn=await this.tryUi(client,rule,run);
+      if(!uiTurn)throw Object.assign(new Error('界面通道未发送：'+run.uiError),{uiNotSent:true});
+      return {uiTurn,thread:{status:{type:'idle'}}};
+    }
     const resume=()=>client.request('thread/resume',{threadId:run.threadId,excludeTurns:true});
     try{return await resume();}catch(e){
       if(e.rpcMethod!=='thread/resume' || !/already has an active writer\b/i.test(e.message))throw e;
@@ -265,6 +272,10 @@ class Scheduler {
         binding={threadId:result.thread.id,accountId:before.accountId,createdByMonitor:true};
         this.state.bindings[rule.id]=binding;run.threadId=binding.threadId;created=true;this.save();
         await client.request('thread/name/set',{threadId:binding.threadId,name:rule.name});
+        if(rule.deliveryMode==='ui'){
+          run.deliveryRoute='api-initial';
+          this.log(rule.id,'首次创建空任务，通过接口发送首条消息以初始化历史；绑定后的触发直接使用界面。');
+        }
       }
       run.threadId=binding.threadId;
       // A brand-new thread has no source rollout until its first turn starts.
@@ -357,6 +368,10 @@ class Scheduler {
       this.log(rule.id,run.message);
     }catch(e){
       run.error={message:e.message,rpcMethod:e.rpcMethod ?? null,rpcCode:e.rpcCode ?? null};
+      if(e.uiNotSent && !mutationAttempted && !run.uiCommitAttempted && !run.uiUncertain){
+        run.status='skipped';run.reason='ui-not-sent';run.message=e.message+' 本次不计次数，规则保持启用。';
+        this.log(rule.id,run.message,'warning');return run;
+      }
       if(!mutationAttempted && !run.uiCommitAttempted && !run.uiUncertain && run.phase==='resuming-thread' && e.rpcMethod==='thread/resume' && /already has an active writer\b/i.test(e.message)){
         run.status='skipped';run.reason='active-writer';
         run.message='此任务仍被另一个 Codex 客户端占用，本次未发送，不计次数；规则保持启用。'+(run.uiError?'界面通道：'+run.uiError+'。':'可在规则中选择界面回退或三通道发送。')+'仅切换页面或重新勾选规则不会立即释放占用。';

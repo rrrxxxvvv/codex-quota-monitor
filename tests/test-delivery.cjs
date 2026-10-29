@@ -11,6 +11,8 @@ function setup(options={}){
   s.calls.push(m);
   if(m==='account/rateLimits/read')return {accountId:'fixture'};
   if(m==='thread/read')return {thread:{id,historyMode:'paginated',status:{type:'idle'},path:'fixture'}};
+  if(m==='thread/start'){s.locked=false;s.turns=[];return {thread:{id}};}
+  if(m==='thread/name/set')return {};
   if(m==='thread/resume'){if(s.locked)throw Object.assign(new Error('already has an active writer'),{rpcMethod:m,rpcCode:-32600});return {thread:{status:{type:'idle'}}};}
   if(m==='thread/turns/list'){
    if(s.uiSent&&s.hydrationPending){s.hydrationPending=false;return {data:s.turns.map((t,i)=>i===s.turns.length-1?{...t,items:[]}:t),nextCursor:null};}
@@ -30,6 +32,18 @@ function setup(options={}){
  return {s,q};
 }
 (async()=>{
+ for(const action of ['append','replaceLast']){
+  const {s,q}=setup({uiMode:'success',locked:false});const r={...rule,deliveryMode:'ui',messageAction:action,replaceLastConfirmed:true};
+  const result=await q.execute(r,'direct-ui');assert.equal(result.status,'success',result.message);assert.equal(result.deliveryRoute,'ui');
+  assert.equal(s.ui,1);assert.equal(s.released,0);assert.equal(q.count(r),1);assert.ok(!s.calls.includes('thread/resume'));assert.ok(!s.calls.includes('turn/start'));assert.ok(!s.calls.includes('thread/revert'));q.stop();
+ }
+ for(const mode of ['protected','notSent','uncertain']){
+  const {s,q}=setup({uiMode:mode});const r={...rule,deliveryMode:'ui'};const result=await q.execute(r,'direct-ui-failure');
+  assert.equal(result.status,mode==='uncertain'?'uncertain':'skipped');assert.equal(s.released,0);assert.ok(!s.calls.includes('thread/resume'));assert.ok(!s.calls.includes('turn/start'));assert.equal(q.count(r),mode==='uncertain'?1:0);q.stop();
+ }
+ {const {s,q}=setup({uiMode:'success'});const r={...rule,deliveryMode:'ui',existingThreadId:''};
+  const first=await q.execute(r,'initialize');assert.equal(first.status,'success',first.message);assert.equal(first.deliveryRoute,'api-initial');assert.equal(s.ui,0);
+  const next=await q.execute(r,'bound-ui');assert.equal(next.status,'success',next.message);assert.equal(next.deliveryRoute,'ui');assert.equal(s.ui,1);assert.equal(s.calls.filter(m=>m==='thread/start').length,1);assert.equal(s.calls.filter(m=>m==='turn/start').length,1);assert.ok(!s.calls.includes('thread/resume'));assert.equal(q.count(r),2);q.stop();}
  for(const action of ['append','replaceLast']){
   const {s,q}=setup({uiMode:'success'});const r={...rule,messageAction:action,replaceLastConfirmed:true};
   const result=await q.execute(r,'ui');assert.equal(result.status,'success',result.message);assert.equal(result.deliveryRoute,'ui');assert.equal(s.released,0);assert.equal(s.calls.filter(x=>x==='turn/start').length,0);assert.equal(q.count(r),1);assert.equal(s.turns.length,action==='append'?2:1);q.stop();
