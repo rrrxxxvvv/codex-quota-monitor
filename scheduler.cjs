@@ -5,7 +5,10 @@ const {Client}=require('./codex-client.cjs');
 const {windowsFrom}=require('./quota-core.cjs');
 const {validateConfig,dueJobs,nextTime,beijing,matchesQuota}=require('./schedule-core.cjs');
 const {inspectActivity}=require('./thread-activity.cjs');
+const {DesktopRelease}=require('./desktop-release.cjs');
+const {DesktopUi}=require('./desktop-ui.cjs');
 const read=file=>JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));
+const uiText=text=>text?.replace(/\r\n?/g,'\n').replace(/\n+$/,'');
 function atomic(file,value){
   fs.writeFileSync(file+'.tmp',JSON.stringify(value,null,2));
   // Windows readers/scanners may briefly deny replacement. Never remove the
@@ -24,6 +27,8 @@ class Scheduler {
     this.data=data;this.makeClient=options.makeClient || (()=>new Client());this.inspectActivity=options.inspectActivity || inspectActivity;
     this.confirmationTimeoutMs=options.confirmationTimeoutMs ?? 10000;
     this.activeRuns=new Map();
+    this.desktopRelease=options.desktopRelease || new DesktopRelease(data);this.desktopLease=null;
+    this.desktopUi=options.desktopUi || new DesktopUi(data);
     fs.mkdirSync(data,{recursive:true});
     this.configFile=path.join(data,'schedule-rules.json');
     this.stateFile=path.join(data,'schedule-state.json');
@@ -91,11 +96,108 @@ class Scheduler {
         this.state.blocked[ruleId]={message:e.message,phase:run.phase,at:new Date().toISOString()};this.log(ruleId,e.message,'error');
       }finally{
         active.checking=false;
-        if(run.status!=='running'){client.close();this.activeRuns.delete(ruleId);this.save();this.publish();}
+        if(run.status!=='running'){await this.closeAndRestore(client,run);this.activeRuns.delete(ruleId);this.save();this.publish();}
       }
     }
   }
   phase(run,phase){run.phase=phase;this.save();this.publish();}
+  async closeAndRestore(client,run){
+    client.close();
+    if(this.desktopLease?.run!==run)return;
+    const lease=this.desktopLease;
+    if(lease.restoring)return lease.restoring;
+    lease.restoring=(async()=>{let closeError=null;try{
+      if(client.proc && client.proc.exitCode===null && client.proc.signalCode===null)await new Promise((resolve,reject)=>{
+        const timeout=setTimeout(()=>reject(new Error('监控连接未退出，请手动打开 Codex。')),10000);
+        client.proc.once('exit',()=>{clearTimeout(timeout);resolve();});
+      }).catch(e=>{closeError=e;});
+      // Always release the helper lease, even if the writer exit timed out.
+      // Otherwise the UI would remain closed until the monitor itself exits.
+      await lease.handle.release();run.desktopRestored=true;
+      if(closeError)throw closeError;
+      this.log(run.ruleId,'已结束监控的写入连接，并请求重新打开 Codex 客户端。');
+    }catch(e){run.desktopRestoreError=e.message;this.log(run.ruleId,'恢复客户端失败：'+e.message,'error');}
+    finally{this.desktopLease=null;}
+    })();return lease.restoring;
+  }
+  reserveTrigger(rule,run){
+    this.state.triggerCounts[rule.id]={activationId:rule.activationId ?? 'legacy',count:this.count(rule)+1};
+    run.triggerNumber=this.count(rule);this.save();
+  }
+  async tryUi(client,rule,run){
+    this.phase(run,'ui-preparing');
+    const history=await this.allTurns(client,run.threadId);
+    if(history.some(t=>t.status==='inProgress'))throw new Error('界面发送前发现任务仍在运行。');
+    const last=history.at(-1),users=(last?.items || []).filter(x=>x.type==='userMessage');
+    if(rule.messageAction==='replaceLast'&&users.length!==1)throw new Error('末轮用户消息不唯一，无法安全编辑。');
+    if(rule.messageAction==='replaceLast'){
+      const backupDir=path.join(this.data,'history-backups');fs.mkdirSync(backupDir,{recursive:true});
+      run.backup=path.join(backupDir,`${run.threadId}-${Date.now()}-ui.json`);atomic(run.backup,{threadId:run.threadId,turns:history});
+      run.replacedTurnId=last.id;run.preservedTurnIds=history.slice(0,-1).map(t=>t.id);
+    }
+    const result=await this.desktopUi.send({threadId:run.threadId,action:rule.messageAction,message:rule.message ?? '你好',expectedLastMessage:users[0]?.content.filter(x=>x.type==='text').map(x=>x.text).join('') || ''},async()=>{
+      if(this.stopped)throw new Error('监控已停止。');
+      const current=await this.allTurns(client,run.threadId);
+      const metadata=await client.request('thread/read',{threadId:run.threadId,includeTurns:false});
+      if(JSON.stringify(current)!==JSON.stringify(history) || this.inspectActivity(metadata.thread.path)!=='idle')throw new Error('界面提交前任务历史或运行状态发生变化，取消发送。');
+      run.uiCommitAttempted=true;run.deliveryRoute='ui';this.reserveTrigger(rule,run);this.phase(run,'ui-submitting');
+    });
+    run.uiLog=result.logFile;run.uiStatusLog=result.statusFile;run.uiError=result.error;run.uiResult=result.status;run.uiRestartAllowed=result.restartAllowed!==false;this.save();
+    if(result.status==='notSent'&&!run.uiCommitAttempted){
+      if(JSON.stringify(await this.allTurns(client,run.threadId))!==JSON.stringify(history))throw new Error('界面尝试后历史变化，停止切换发送方式。');
+      this.log(rule.id,'界面通道未提交消息：'+result.error,'warning');return null;
+    }
+    if(result.status!=='submitted'){run.uiUncertain=true;throw new Error('界面发送结果未确认，不会切换通道重发：'+result.error);}
+    run.uiSubmittedAt=new Date().toISOString();
+    const prefix=rule.messageAction==='append'?history:history.slice(0,-1);
+    const deadline=Date.now()+30000;
+    while(!this.stopped&&Date.now()<deadline){
+      const current=await this.allTurns(client,run.threadId),turn=current.at(-1);
+      if(current.length===prefix.length+1 && turn.id!==last?.id){
+        const sent=(turn.items || []).filter(x=>x.type==='userMessage');
+        const actual=sent[0]?.content.filter(x=>x.type==='text').map(x=>x.text).join('');
+        const messageMatches=sent.length===1&&uiText(actual)===uiText(rule.message ?? '你好');
+        const prefixMatches=JSON.stringify(current.slice(0,-1))===JSON.stringify(prefix);
+        run.uiHistoryCheck={turnId:turn.id,status:turn.status,userMessageCount:sent.length,messageMatches,prefixMatches};
+        if(messageMatches&&prefixMatches){
+          run.uiHistoryVerified=true;return turn;
+        }
+        // The GUI creates the turn before persisting its user-message item.
+        // Wait for the snapshot to hydrate; never submit again while waiting.
+      }
+      await new Promise(r=>setTimeout(r,500));
+    }
+    run.uiUncertain=true;throw new Error('界面点击发送后未能确认消息及前序历史，详情见 uiHistoryCheck；不会重发。');
+  }
+  async resumeThread(client,rule,run){
+    const resume=()=>client.request('thread/resume',{threadId:run.threadId,excludeTurns:true});
+    try{return await resume();}catch(e){
+      if(e.rpcMethod!=='thread/resume' || !/already has an active writer\b/i.test(e.message))throw e;
+      if(['apiUi','apiUiRestart'].includes(rule.deliveryMode)){
+        this.log(rule.id,'接口遇到写入占用，尝试通过 Codex 客户端界面发送。');
+        const uiTurn=await this.tryUi(client,rule,run);
+        if(uiTurn)return {uiTurn,thread:{status:{type:'idle'}}};
+      }
+      this.phase(run,'resuming-thread');
+      if(rule.deliveryMode!=='apiUiRestart'||rule.releaseDesktopOnConflict!==true||run.uiRestartAllowed===false)throw e;
+      if(this.activeRuns.size || this.stopped)throw new Error('监控还有任务正在运行或已停止，本次不退出 Codex 客户端。');
+      this.phase(run,'releasing-desktop');
+      this.log(rule.id,'按规则授权退出整个 Codex 客户端以释放占用；其他客户端任务可能被中断。');
+      const handle=await this.desktopRelease.acquire();
+      this.desktopLease={handle,run};run.desktopReleaseLog=handle.statusFile;
+      run.deliveryRoute='restart-api';
+      if(this.stopped)throw new Error('监控已停止，取消发送并恢复客户端。');
+      // Only the pre-submission resume may be retried. Never replay turn/start.
+      this.phase(run,'resuming-thread');
+      const deadline=Date.now()+10000;
+      for(;;){
+        try{return await resume();}catch(error){
+          if(this.stopped || Date.now()>=deadline || error.rpcMethod!=='thread/resume' || !/already has an active writer\b/i.test(error.message))throw error;
+          await new Promise(r=>setTimeout(r,500));
+        }
+      }
+    }
+  }
   async submittedTurns(client,run,allowPending=false){
     let page;
     try{page=await client.request('thread/turns/list',{threadId:run.threadId,sortDirection:'desc',limit:3,itemsView:'full'});}
@@ -109,7 +211,10 @@ class Scheduler {
       // The persisted snapshot can briefly lag behind the owning live runtime.
       // Keep the connection alive while that runtime is still executing.
       const metadata=await client.request('thread/read',{threadId:run.threadId,includeTurns:false});
-      if(metadata.thread.status.type==='active')return {...page,data:page.data.map(t=>t.id===run.turnId?{...t,status:'inProgress'}:t)};
+      // A GUI edit also switches the rollout branch. Both the metadata path and
+      // the persisted status can briefly refer to the previous idle branch.
+      const guiSettling=run.deliveryRoute==='ui' && Date.now()-Date.parse(run.uiSubmittedAt)<30000;
+      if(guiSettling || metadata.thread.status.type==='active' || (run.deliveryRoute==='ui' && this.inspectActivity(metadata.thread.path)==='active'))return {...page,data:page.data.map(t=>t.id===run.turnId?{...t,status:'inProgress'}:t)};
     }
     return page;
   }
@@ -123,19 +228,19 @@ class Scheduler {
     return turns;
   }
   async execute(rule,key,scheduledAt='手动执行',triggerAccountId=null){
-    if(this.busy || this.stopped)return;
+    if(this.busy || this.stopped || this.desktopLease)return;
     if(!['append','replaceLast'].includes(rule.messageAction) || rule.needsActionReview || (rule.messageAction==='replaceLast'&&rule.replaceLastConfirmed!==true))return;
     if(this.state.runs[key])return;
     if(this.exhausted(rule))return;
     if(this.state.blocked[rule.id])throw new Error('该规则存在待核对的异常，需先处理。');
     this.busy=true;
-    const run={ruleId:rule.id,messageAction:rule.messageAction,at:new Date().toISOString(),scheduledAt,status:'running',phase:'checking',threadId:null,message:'正在检查账号与会话'};
+    const run={ruleId:rule.id,messageAction:rule.messageAction,deliveryRoute:'api',at:new Date().toISOString(),scheduledAt,status:'running',phase:'checking',threadId:null,message:'正在检查账号与会话'};
     this.state.runs[key]=run;this.save();this.publish();
     if(this.activeRuns.has(rule.id)){
       run.status='skipped';run.message='此规则的上次任务仍在执行，本次跳过。';this.log(rule.id,run.message);this.busy=false;this.publish();return run;
     }
     const client=this.makeClient();this.client=client;
-    let mutationAttempted=false;
+    let mutationAttempted=false,uiTurn=null;
     try{
       await client.init();
       const before=await client.request('account/rateLimits/read');
@@ -180,10 +285,12 @@ class Scheduler {
         if(activity==='unknown')throw new Error('无法可靠确认会话空闲，已停止本次执行。');
       }
       this.phase(run,'resuming-thread');
-      const resumed=await client.request('thread/resume',{threadId:binding.threadId,excludeTurns:true});
+      const resumed=await this.resumeThread(client,rule,run);
+      uiTurn=resumed.uiTurn || null;
       if(resumed.thread.status.type==='active'){
         run.status='skipped';run.message='会话正在执行任务，本次跳过。';this.log(rule.id,run.message);return run;
       }
+      if(!uiTurn){
       const turns=rule.messageAction==='replaceLast'?await this.allTurns(client,binding.threadId):(await client.request('thread/turns/list',{threadId:binding.threadId,sortDirection:'desc',limit:1,itemsView:'notLoaded'})).data;
       if(turns.some(t=>t.status==='inProgress')){
         run.status='skipped';run.message='会话有尚未结束的消息，本次跳过。';this.log(rule.id,run.message);return run;
@@ -206,13 +313,13 @@ class Scheduler {
         if(JSON.stringify(retained)!==JSON.stringify(turns.slice(0,-1)))throw new Error('编辑末条后的前序历史与备份不一致，已停止发送；请保留历史备份排查。');
       }
       }
+      }
       this.phase(run,'sending');mutationAttempted=true;
       // Reserve a trigger before submitting. An uncertain transport result cannot
       // exceed the user's maximum by retrying after restart.
-      this.state.triggerCounts[rule.id]={activationId:rule.activationId ?? 'legacy',count:this.count(rule)+1};
-      run.triggerNumber=this.count(rule);this.save();
       const message=rule.message ?? '你好';
-      const response=await client.request('turn/start',{threadId:binding.threadId,clientUserMessageId:randomUUID(),input:[{type:'text',text:message}]});
+      if(!uiTurn)this.reserveTrigger(rule,run);
+      const response=uiTurn?{turn:uiTurn}:await client.request('turn/start',{threadId:binding.threadId,clientUserMessageId:randomUUID(),input:[{type:'text',text:message}]});
       run.turnId=response.turn.id;this.phase(run,'waiting');
       let completed=null;
       const deadline=Date.now()+this.confirmationTimeoutMs;
@@ -226,7 +333,8 @@ class Scheduler {
       const final=await this.submittedTurns(client,run);
       const currentTurn=final.data.find(t=>t.id===run.turnId);
       const users=(currentTurn?.items || []).filter(i=>i.type==='userMessage');
-      const messageMatches=users.length===1 && users[0].content.filter(x=>x.type==='text').map(x=>x.text).join('')===message;
+      const actualMessage=users[0]?.content.filter(x=>x.type==='text').map(x=>x.text).join('');
+      const messageMatches=users.length===1 && (uiTurn?uiText(actualMessage)===uiText(message):actualMessage===message);
       let historyMatches=true;
       if(rule.messageAction==='replaceLast'){
         const history=await this.allTurns(client,binding.threadId);
@@ -249,16 +357,16 @@ class Scheduler {
       this.log(rule.id,run.message);
     }catch(e){
       run.error={message:e.message,rpcMethod:e.rpcMethod ?? null,rpcCode:e.rpcCode ?? null};
-      if(!mutationAttempted && run.phase==='resuming-thread' && e.rpcMethod==='thread/resume' && /already has an active writer\b/i.test(e.message)){
+      if(!mutationAttempted && !run.uiCommitAttempted && !run.uiUncertain && run.phase==='resuming-thread' && e.rpcMethod==='thread/resume' && /already has an active writer\b/i.test(e.message)){
         run.status='skipped';run.reason='active-writer';
-        run.message='此会话的写入连接仍被另一个 Codex 客户端持有。本次跳过，未修改历史、未发送消息，不计次数；规则保持启用。桌面端可继续使用其他会话；已打开过此会话时，仅切走或重新勾选规则不会立即释放占用，请等待占用客户端释放后再等下次触发。';
+        run.message='此任务仍被另一个 Codex 客户端占用，本次未发送，不计次数；规则保持启用。'+(run.uiError?'界面通道：'+run.uiError+'。':'可在规则中选择界面回退或三通道发送。')+'仅切换页面或重新勾选规则不会立即释放占用。';
         this.log(rule.id,run.message,'warning');return run;
       }
-      run.status=mutationAttempted?'uncertain':'failed';run.message=e.message;
+      run.status=(mutationAttempted||run.uiCommitAttempted||run.uiUncertain)?'uncertain':'failed';run.message=e.message;
       this.state.blocked[rule.id]={message:e.message,phase:run.phase,at:new Date().toISOString()};
       this.log(rule.id,e.message,'error');
     }finally{
-      this.save();if(!this.activeRuns.has(rule.id))client.close();this.client=null;this.busy=false;this.publish();
+      this.save();if(!this.activeRuns.has(rule.id))await this.closeAndRestore(client,run);this.client=null;this.busy=false;this.publish();
     }
     return run;
   }
@@ -315,10 +423,10 @@ class Scheduler {
   }
   start(){this.timer=setInterval(()=>{this.pollActiveRuns().catch(e=>{this.error=e.message;this.publish();});this.tick().catch(e=>{this.error=e.message;this.publish();});},5000);this.tick().catch(e=>{this.error=e.message;this.publish();});}
   stop(){
-    this.stopped=true;clearInterval(this.timer);this.client?.close();
+    this.stopped=true;clearInterval(this.timer);this.desktopUi.cancel?.();this.client?.close();
     for(const [ruleId,{client,run}] of this.activeRuns){
       run.status='uncertain';run.message='监控退出时任务尚未确认完成，请检查会话；不会自动重发。';
-      this.state.blocked[ruleId]={message:run.message,phase:run.phase,at:new Date().toISOString()};client.close();
+      this.state.blocked[ruleId]={message:run.message,phase:run.phase,at:new Date().toISOString()};this.closeAndRestore(client,run).catch(e=>{this.error=e.message;this.publish();});
     }
     this.activeRuns.clear();this.save();this.publish();
   }

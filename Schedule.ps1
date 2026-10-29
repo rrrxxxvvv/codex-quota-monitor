@@ -65,6 +65,8 @@ function Select-Rule($id) {
         $script:ruleMessage.Text = if ($null -ne $rule.message) { $rule.message } else { '你好' }
         $script:messageAction.SelectedIndex = switch ($rule.messageAction) { 'append' { 0 }; 'replaceLast' { 1 }; default { -1 } }
         $script:replaceLastConsent.IsChecked = $rule.replaceLastConfirmed -eq $true
+        $script:releaseDesktopConsent.IsChecked = $rule.releaseDesktopOnConflict -eq $true
+        $script:deliveryMode.SelectedIndex = switch ($rule.deliveryMode) { 'apiUi' { 1 }; 'apiUiRestart' { 2 }; default { 0 } }
         if (-not $rule.messageAction -or $rule.needsActionReview) { $script:ruleEnabled.IsChecked = $false }
         foreach ($date in $rule.dates) { $script:ruleDates.Items.Add($date.Replace('T', ' ')) | Out-Null }
         if ($rule.type -eq 'interval') {
@@ -80,6 +82,8 @@ function Select-Rule($id) {
         $script:ruleMessage.Text = '你好'
         $script:messageAction.SelectedIndex = 0
         $script:replaceLastConsent.IsChecked = $false
+        $script:releaseDesktopConsent.IsChecked = $false
+        $script:deliveryMode.SelectedIndex = 1
         $script:ruleThread.Text = ''
         $script:ruleEnabled.IsChecked = $false
         $script:ruleType.SelectedIndex = 0
@@ -136,6 +140,11 @@ function Update-ScheduleStatus {
         $info = New-Object 'System.Collections.Generic.List[string]'
         if (-not $rule) { $info.Add('新规则默认关闭。保存后可单独启用。') }
         else {
+            if ($rule.lastRun.deliveryRoute) { $info.Add('本次发送通道：' + (@{api='接口';ui='界面操作';'restart-api'='退出客户端后接口发送'}[$rule.lastRun.deliveryRoute])) }
+            if ($rule.lastRun.uiLog) { $info.Add('界面日志：' + $rule.lastRun.uiLog) }
+            if ($rule.lastRun.uiStatusLog) { $info.Add('界面状态日志：' + $rule.lastRun.uiStatusLog) }
+            if ($rule.lastRun.desktopReleaseLog) { $info.Add('客户端恢复日志：' + $rule.lastRun.desktopReleaseLog) }
+            if ($rule.lastRun.desktopRestoreError) { $info.Add('客户端恢复失败：' + $rule.lastRun.desktopRestoreError) }
             if ($rule.blocked -or $rule.lastRun.status -in @('failed', 'uncertain') -or $rule.lastRun.reason -eq 'active-writer') { $script:scheduleLogLocation.Visibility = 'Visible' }
             if ($rule.binding) {
                 $script:ruleThread.Text = [string]$rule.binding.threadId
@@ -402,7 +411,18 @@ function Show-ScheduleWindow {
     $editor.Children.Add((New-Text '新建会话沿用只读权限；自定义消息不会自动授予文件修改或命令审批权限。' 12 '#53627B')) | Out-Null
     $editor.Children.Add((New-Text '会话链接或 ID（首次留空，触发后自动回填并保存）' 14 '#182848')) | Out-Null
     $script:ruleThread = New-RuleTextBox; $editor.Children.Add($script:ruleThread) | Out-Null
-    $editor.Children.Add((New-Text 'Codex 桌面端可同时使用其他会话。专用会话建议留给监控使用；在桌面端打开过后，仅切走不一定立即释放占用，占用期间触发会跳过。' 12 '#53627B')) | Out-Null
+    $editor.Children.Add((New-Text '专用任务可减少占用冲突。桌面端打开任务后，仅切换页面不一定释放占用；可在下方配置界面发送及退出客户端的回退方式。' 12 '#53627B')) | Out-Null
+    $editor.Children.Add((New-Text '发送通道（依次尝试，结果不确定时停止）' 14 '#182848')) | Out-Null
+    $script:deliveryMode = New-Object System.Windows.Controls.ComboBox
+    foreach ($label in @('仅接口', '接口 → 界面操作', '接口 → 界面操作 → 退出客户端后接口发送并重开')) { $script:deliveryMode.Items.Add($label) | Out-Null }
+    $script:deliveryMode.FontSize = 14; $script:deliveryMode.Padding = '8'; $script:deliveryMode.Margin = '0,0,0,10'
+    $editor.Children.Add($script:deliveryMode) | Out-Null
+    $editor.Children.Add((New-Text '界面通道需要桌面解锁，并短暂使用键鼠。通过任务菜单复制链接核对 ID；已有草稿不覆盖，用户输入或切换窗口会停止回退。按控件位置操作，适配分辨率和主题；当前支持中英文菜单，未识别时不盲点。诊断日志位于 data/ui-automation。' 12 '#53627B')) | Out-Null
+    $script:releaseDesktopConsent = New-Object System.Windows.Controls.CheckBox
+    $script:releaseDesktopConsent.Content = '允许最后一级关闭整个 Codex（可能中断其他任务），完成后重开'
+    $script:releaseDesktopConsent.Margin = '0,8,0,8'
+    $editor.Children.Add($script:releaseDesktopConsent) | Out-Null
+    $editor.Children.Add((New-Text '默认关闭。开启即允许终止整个客户端及其后台，可能中断其他任务（包括当前对话）。仅目标任务已空闲但仍被占用时执行；消息任务结束、失败或监控退出后尝试恢复客户端。无法只释放一个对话。' 12 '#9F4545')) | Out-Null
     $editor = New-RuleSection $editorRoot '运行方式'
     $script:runMode = New-Object System.Windows.Controls.ComboBox
     $script:runMode.Items.Add('始终开启') | Out-Null
@@ -437,6 +457,8 @@ function Show-ScheduleWindow {
             $action = switch ($script:messageAction.SelectedIndex) { 0 { 'append' }; 1 { 'replaceLast' }; default { throw '请选择发送方式：追加消息，或编辑末条用户消息并重发。' } }
             $replaceLastConfirmed = $action -eq 'replaceLast' -and $script:replaceLastConsent.IsChecked -eq $true
             if ($action -eq 'replaceLast' -and -not $replaceLastConfirmed) { throw '编辑末条会替换最后一轮。请勾选允许替换，或改用追加消息。' }
+            $delivery = switch ($script:deliveryMode.SelectedIndex) { 0 { 'api' }; 1 { 'apiUi' }; 2 { 'apiUiRestart' }; default { throw '请选择发送通道。' } }
+            if ($delivery -eq 'apiUiRestart' -and $script:releaseDesktopConsent.IsChecked -ne $true) { throw '第三条通道会退出整个 Codex 客户端，请勾选允许关闭客户端。' }
             $quotaWindow = switch ($script:quotaWindow.SelectedIndex) { 0 { 'fiveHour' }; 1 { 'weekly' }; default { 'any' } }
             $times = @()
             if ($ruleType -eq 'daily') {
@@ -472,7 +494,7 @@ function Show-ScheduleWindow {
             $reenabling = $script:ruleEnabled.IsChecked -and $oldRule -and -not $oldRule.enabled
             $activationId = if ($oldRule.activationId) { $oldRule.activationId } else { 'legacy' }
             if (-not $oldRule -or $reenabling -or $oldRule.runLimit -ne $limitValue) { $activationId = [Guid]::NewGuid().ToString() }
-            $replacement = [PSCustomObject]@{id = $id; name = $name; enabled = [bool]$script:ruleEnabled.IsChecked; type = $ruleType; message = $message; messageAction = $action; replaceLastConfirmed = [bool]$replaceLastConfirmed; needsActionReview = $false; quotaWindow = $quotaWindow; runLimit = $limitValue; activationId = $activationId; times = $times; dates = $dates; startAt = $startAt; intervalMinutes = $intervalMinutes; existingThreadId = $threadId}
+            $replacement = [PSCustomObject]@{id = $id; name = $name; enabled = [bool]$script:ruleEnabled.IsChecked; type = $ruleType; message = $message; messageAction = $action; deliveryMode = $delivery; replaceLastConfirmed = [bool]$replaceLastConfirmed; needsActionReview = $false; releaseDesktopOnConflict = [bool]$script:releaseDesktopConsent.IsChecked; quotaWindow = $quotaWindow; runLimit = $limitValue; activationId = $activationId; times = $times; dates = $dates; startAt = $startAt; intervalMinutes = $intervalMinutes; existingThreadId = $threadId}
             $found = $false
             for ($i = 0; $i -lt $script:scheduleRules.Count; $i++) {
                 if ($script:scheduleRules[$i].id -eq $id) { $script:scheduleRules[$i] = $replacement; $found = $true; break }

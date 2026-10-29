@@ -39,6 +39,17 @@ try {
     if ($saved.rules[0].existingThreadId -ne '11111111-1111-4111-8111-111111111111') { throw 'Thread link normalization failed' }
     $originalId = $saved.rules[0].id
     if ($saved.rules[0].messageAction -ne 'append' -or $saved.rules[0].replaceLastConfirmed) { throw 'Append default did not persist' }
+    if ($saved.rules[0].deliveryMode -ne 'apiUi') { throw 'New rule UI fallback default missing' }
+    $script:deliveryMode.SelectedIndex = 2
+    Click-Button '保存规则'
+    if ($script:scheduleFeedback.Text -notlike '*勾选允许关闭客户端*') { throw 'Client shutdown consent not required' }
+    $script:releaseDesktopConsent.IsChecked = $true
+    Click-Button '保存规则'
+    $saved = [IO.File]::ReadAllText((Join-Path $dataDir 'schedule-rules.json')) | ConvertFrom-Json
+    if ($saved.rules[0].deliveryMode -ne 'apiUiRestart' -or -not $saved.rules[0].releaseDesktopOnConflict) { throw 'Three-channel route did not persist' }
+    $script:deliveryMode.SelectedIndex = 0
+    $script:releaseDesktopConsent.IsChecked = $false
+    Click-Button '保存规则'
     $script:messageAction.SelectedIndex = 1
     Click-Button '保存规则'
     if ($script:scheduleFeedback.Text -notlike '*勾选允许替换*') { throw 'Unconfirmed replacement was accepted' }

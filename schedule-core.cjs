@@ -21,6 +21,11 @@ function validateConfig(input) {
     const messageAction=legacyAction?'append':r.messageAction;
     if(!['append','replaceLast'].includes(messageAction))throw new Error(`${r.name}：发送方式无效。`);
     const replaceLastConfirmed=r.replaceLastConfirmed===true;
+    if(r.releaseDesktopOnConflict!==undefined && typeof r.releaseDesktopOnConflict!=='boolean')throw new Error(`${r.name}：主动释放客户端占用选项必须为布尔值。`);
+    const releaseDesktopOnConflict=r.releaseDesktopOnConflict===true;
+    const deliveryMode=r.deliveryMode ?? 'api';
+    if(!['api','apiUi','apiUiRestart'].includes(deliveryMode))throw new Error(`${r.name}：发送通道无效。`);
+    if(deliveryMode==='apiUiRestart'&&!releaseDesktopOnConflict)throw new Error(`${r.name}：请确认允许关闭整个 Codex 客户端，或选择不重启的发送通道。`);
     const needsActionReview=legacyAction || r.needsActionReview===true || (messageAction==='replaceLast'&&!replaceLastConfirmed);
     const quotaWindow=r.quotaWindow ?? 'any';
     if(!['any','fiveHour','weekly'].includes(quotaWindow))throw new Error(`${r.name}：额度范围无效。`);
@@ -40,7 +45,7 @@ function validateConfig(input) {
     if(link)existingThreadId=link[1];
     if(existingThreadId && !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(existingThreadId))throw new Error(`${r.name}：请输入完整本机会话 ID 或 codex://threads/ 会话链接。`);
     existingThreadId=existingThreadId.toLowerCase();
-    return {id:r.id,name:r.name.trim(),enabled:r.enabled&&!needsActionReview,type,message,messageAction,replaceLastConfirmed,needsActionReview,quotaWindow,runLimit,activationId,times:[...new Set(times)].sort(),dates:[...new Set(dates)].sort(),startAt,intervalMinutes,existingThreadId};
+    return {id:r.id,name:r.name.trim(),enabled:r.enabled&&!needsActionReview,type,message,messageAction,deliveryMode,replaceLastConfirmed,releaseDesktopOnConflict,needsActionReview,quotaWindow,runLimit,activationId,times:[...new Set(times)].sort(),dates:[...new Set(dates)].sort(),startAt,intervalMinutes,existingThreadId};
   });
   return {version:1,timeZone:'Asia/Shanghai',rules};
 }

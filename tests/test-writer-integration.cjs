@@ -154,6 +154,22 @@ async function waitTurn(client,threadId,turnId){
   assert.equal(afterEdit.data.at(-1).items.find(x=>x.type==='userMessage').content.filter(x=>x.type==='text').map(x=>x.text).join(''),replaceRule.message);
  }
  console.log('PASS: edit final user message twice in the real 15-turn task -> preceding 14 turns unchanged, same thread, last turn only replaced.');
+ // Exercise the full scheduler against a real competing app-server. UI failure
+ // and desktop lifecycle are injected; the writer acquisition and turn are real.
+ const conflictOwner=makeClient();await conflictOwner.init();await conflictOwner.request('thread/resume',{threadId:boundId,excludeTurns:true});
+ let uiAttempts=0,releaseAttempts=0,restored=false;
+ scheduler.desktopUi={cancel(){},async send(){uiAttempts++;return {status:'notSent',error:'fixture unsupported UI'};}};
+ scheduler.desktopRelease={async acquire(){releaseAttempts++;await close(conflictOwner);return {statusFile:'fixture',async release(){
+   const reopened=makeClient();await reopened.init();
+   await reopened.request('thread/resume',{threadId:boundId,excludeTurns:true});restored=true;await close(reopened);
+ }}}};
+ const fallback={...appendRule,id:'fallback-test',deliveryMode:'apiUiRestart',releaseDesktopOnConflict:true};
+ const fallbackResult=await scheduler.execute(fallback,'fallback');
+ assert.equal(fallbackResult.status,'success',fallbackResult.message);assert.equal(fallbackResult.deliveryRoute,'restart-api');
+ assert.equal(uiAttempts,1);assert.equal(releaseAttempts,1);assert.ok(restored);assert.equal(scheduler.count(fallback),1);
+ const afterFallback=await reader.request('thread/turns/list',{threadId:boundId,sortDirection:'asc',limit:50,itemsView:'full'});
+ assert.equal(afterFallback.data.length,16);assert.deepEqual(afterFallback.data.slice(0,14),afterAppend.data.slice(0,14));
+ console.log('PASS: full fallback scheduler with real conflicting writer -> simulated unsupported UI -> owner exit -> API append -> new owner resumes after monitor closes. Desktop shutdown itself is not exercised.');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(async()=>{
  releaseHeldResponse?.();
  scheduler?.stop();await Promise.all(clients.map(close));server.closeAllConnections();server.close();

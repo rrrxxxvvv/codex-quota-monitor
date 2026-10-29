@@ -44,7 +44,7 @@ try {
     # Explicit source allowlist: never copy data, credentials, logs or build output.
     $files = @('Monitor.ps1', 'Schedule.ps1', 'Remote.ps1', 'Start.vbs', 'Settings.vbs',
         'monitor.cjs', 'codex-client.cjs', 'quota-core.cjs', 'schedule-core.cjs',
-        'scheduler.cjs', 'thread-activity.cjs', 'remote.cjs', 'VERSION', 'README.md', 'CHANGELOG.md')
+        'scheduler.cjs', 'desktop-release.cjs', 'DesktopRelease.ps1', 'desktop-ui.cjs', 'DesktopAutomation.ps1', 'DesktopAutomation.cs', 'thread-activity.cjs', 'remote.cjs', 'VERSION', 'README.md', 'CHANGELOG.md')
     foreach ($file in $files) { [IO.File]::Copy((Join-Path $PSScriptRoot $file), (Join-Path $package $file)) }
     $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
     try {
